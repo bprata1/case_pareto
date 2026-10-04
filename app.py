@@ -107,15 +107,17 @@ if st.session_state.get('processado', False):
             loja_sugerida = ""
             
             # Validação Fornecedor
+            err_forn_ph = st.empty()
             try:
                 cod_forn, cnpj_forn = erp_integration.validar_fornecedor(fornecedor_extraido)
                 cod_forn_sugerido = cod_forn
             except Exception as e:
                 cod_forn_sugerido = fornecedor_extraido
-                st.error(f"Erro ao validar Fornecedor: {e}. Edite manualmente abaixo.")
+                err_forn_ph.error(f"Erro ao validar Fornecedor: {e}. Edite manualmente abaixo.")
             
             # Validação Loja (tratando lista ou string)
             # A politica aceita ["REDE"] ou ["LOJA-###"]. O extrator pode trazer "todas as lojas"
+            err_loja_ph = st.empty()
             try:
                 if isinstance(loja_extraida, list) and loja_extraida:
                     lojas_validadas = []
@@ -131,15 +133,19 @@ if st.session_state.get('processado', False):
                     loja_sugerida = erp_integration.validar_loja(loja_extraida_str)
             except Exception as e:
                 loja_sugerida = loja_extraida_str
-                st.error(f"Erro ao validar Loja: {e}. Edite manualmente abaixo.")
+                err_loja_ph.error(f"Erro ao validar Loja: {e}. Edite manualmente abaixo.")
             
             # Auditoria inicial pela IA (apenas visualização)
             cond_json_str = json.dumps(cond, ensure_ascii=False)
             auditoria = agents.auditar_condicoes(cond_json_str)
             
-            parecer = auditoria.get("parecer", "")
-            aprovado = auditoria.get("aprovado", False)
-            alcada = auditoria.get("alcada_necessaria", "N/A")
+            pareceres = auditoria.get("parecer_auditoria", [{}])
+            p_dados = pareceres[0] if pareceres else {}
+            
+            parecer = p_dados.get("raciocinio_passo_a_passo", "")
+            status_pol = p_dados.get("status_politica", "")
+            aprovado = status_pol in ["DENTRO_DA_POLITICA", "EXCECAO_SAZONAL"]
+            alcada = p_dados.get("alcada_necessaria", "N/A")
             
             if aprovado:
                 st.success(f"**Parecer da IA:** {parecer} | **Alçada Necessária:** {alcada}")
@@ -158,11 +164,11 @@ if st.session_state.get('processado', False):
                     edit_tipo = st.selectbox(
                         "Tipo", 
                         ["DESCONTO_PERCENTUAL", "VERBA_EXPOSICAO"], 
-                        index=0 if "DESCONTO" in str(cond.get("tipo", "")).upper() else 1,
+                        index=0 if "DESCONTO" in str(cond.get("tipo_condicao", "")).upper() else 1,
                         key=f"tipo_{i}"
                     )
                     # Convertendo valor ou percentual para float
-                    val_perc = cond.get("percentual", cond.get("valor", 0.0))
+                    val_perc = cond.get("valor_extraido", cond.get("percentual", cond.get("valor", 0.0)))
                     try:
                         val_perc = float(val_perc)
                     except:
@@ -179,23 +185,32 @@ if st.session_state.get('processado', False):
                 submit_btn = st.form_submit_button("Confirmar e Gerar Integração")
                 
                 if submit_btn:
+                    # Limpa as mensagens de erro iniciais já que o usuário está submetendo
+                    err_forn_ph.empty()
+                    err_loja_ph.empty()
+                    
                     # Montar JSON com as edições do usuário
                     dados_editados = {
                         "categoria": edit_cat,
-                        "tipo": edit_tipo,
-                        "valor_percentual": edit_valor,
+                        "tipo_condicao": edit_tipo,
+                        "valor_extraido": edit_valor,
                         "data_inicio": edit_dt_ini,
                         "data_fim": edit_dt_fim,
-                        "lojas": edit_loja.split(",") if "," in edit_loja else [edit_loja],
+                        "lojas_mencionadas": edit_loja.split(",") if "," in edit_loja else [edit_loja],
                         "fornecedor": edit_forn
                     }
                     
                     # Reavaliar silenciosamente a regra
                     re_auditoria = agents.auditar_condicoes(json.dumps(dados_editados, ensure_ascii=False))
-                    re_aprovado = re_auditoria.get("aprovado", False)
+                    re_pareceres = re_auditoria.get("parecer_auditoria", [{}])
+                    re_p_dados = re_pareceres[0] if re_pareceres else {}
+                    
+                    re_status_pol = re_p_dados.get("status_politica", "")
+                    re_aprovado = re_status_pol in ["DENTRO_DA_POLITICA", "EXCECAO_SAZONAL"]
+                    re_parecer_texto = re_p_dados.get("raciocinio_passo_a_passo", "Política infringida (sem detalhes).")
                     
                     if not re_aprovado:
-                        st.error(f"Erro na validação pós-edição: {re_auditoria.get('parecer', 'Política infringida.')}")
+                        st.error(f"Erro na validação pós-edição: {re_parecer_texto}")
                     else:
                         st.success("Dados aprovados! Gerando Payload...")
                         
