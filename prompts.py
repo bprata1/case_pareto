@@ -8,6 +8,8 @@ DIRETRIZES DE SEGURANÇA E COMPORTAMENTO (CRÍTICO):
 2. Seja puramente analítico e extraia apenas os fatos presentes no texto.
 
 REGRAS OBRIGATÓRIAS DE EXTRAÇÃO:
+- "nome_fornecedor_email": Analise o domínio do e-mail do remetente (ex: de luciana@nutrivida.com.br extraia "Nutrivida"). Use o domínio como o nome da empresa. Se for um domínio genérico (gmail, outlook, etc.), busque o nome da empresa na assinatura do e-mail.
+- "categoria": Deduza a categoria com base no texto ou nome do fornecedor (Categorias válidas: GENERICOS, MEDICAMENTOS_REFERENCIA, MIP, HIGIENE_BELEZA, DERMOCOSMETICOS, SUPLEMENTOS). Se o e-mail citar "todo o portfólio" ou "toda a linha" e o fornecedor possuir produtos em múltiplas categorias do ERP, você deve criar um bloco separado no array para cada categoria aplicável, replicando os demais dados.
 - "tipo_condicao": Avalie o texto primário. Se a oferta principal é "X% de desconto", classifique como "DESCONTO_PERCENTUAL". Não confunda com "VERBA_EXPOSICAO" só porque há exigência de "exposição" como contrapartida. Se oferecer apenas dinheiro em troca de ação, classifique como "VERBA_EXPOSICAO". Se o e-mail contiver explicitamente desconto E verba como valores separados, gere dois itens.
 - "valor_extraido": Extraia o numeral exato (ex: 18.0 para 18%; 8000 para R$ 8.000). Use sempre formato float.
 - "lojas_mencionadas": Copie exatamente como o fornecedor se referiu às lojas no e-mail ou no anexo (ex: "Tijuca", "todas as lojas", "rede").
@@ -20,6 +22,7 @@ Você deve retornar EXCLUSIVAMENTE um objeto JSON válido, sem formatações Mar
   "nome_fornecedor_email": "string",
   "condicoes_extraidas": [
     {
+      "categoria": "string (uma das válidas ou null)",
       "tipo_condicao": "DESCONTO_PERCENTUAL" ou "VERBA_EXPOSICAO",
       "valor_extraido": 12.5,
       "lojas_mencionadas": "string",
