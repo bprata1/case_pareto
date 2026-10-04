@@ -63,8 +63,12 @@ def validar_fornecedor(nome_extraido: str):
         
     nome_busca = nome_extraido.strip().lower()
     
-    for f in FORNECEDORES:
-        nome_forn = f.get('nome', '').strip().lower()
+    lista_fornecedores = FORNECEDORES
+    if isinstance(lista_fornecedores, dict):
+        lista_fornecedores = lista_fornecedores.get('itens', [])
+        
+    for f in lista_fornecedores:
+        nome_forn = f.get('nome', f.get('razao_social', '')).strip().lower()
         if nome_busca in nome_forn or nome_forn in nome_busca:
             if f.get('status') == 'ATIVO':
                 return f.get('cod_fornecedor'), f.get('cnpj')
@@ -83,15 +87,20 @@ def validar_loja(nome_loja: str):
         
     nome_busca = nome_loja.strip().lower()
     
-    # LOJAS pode ser uma lista ou um dict dependendo de como o JSON está estruturado
-    # Assumindo que é uma lista de dicts com 'nome' ou 'filial' e 'codigo' ou 'id'
-    # Vamos tratar como uma lista de chaves/valores ou iterar de acordo
-    if isinstance(LOJAS, dict):
-        for codigo, nome in LOJAS.items():
+    # Normalizar se for um dicionário wrapper do tipo {"itens": [...]}
+    lista_lojas = LOJAS
+    if isinstance(lista_lojas, dict):
+        if 'itens' in lista_lojas:
+            lista_lojas = lista_lojas['itens']
+        elif len(lista_lojas) > 0 and isinstance(list(lista_lojas.values())[0], list):
+            lista_lojas = list(lista_lojas.values())[0]
+    
+    if isinstance(lista_lojas, dict):
+        for codigo, nome in lista_lojas.items():
             if isinstance(nome, str) and (nome_busca in nome.strip().lower() or nome.strip().lower() in nome_busca):
                 return codigo
-    elif isinstance(LOJAS, list):
-        for l in LOJAS:
+    elif isinstance(lista_lojas, list):
+        for l in lista_lojas:
             nome = l.get('nome', l.get('filial', '')).strip().lower()
             if nome_busca in nome or nome in nome_busca:
                 return l.get('codigo', l.get('id', l.get('cod_loja', '')))

@@ -66,10 +66,11 @@ if st.button("Extrair e Auditar Condições", type="primary"):
             else:
                 # Tentar inferir onde está a lista no JSON retornado
                 condicoes_lista = []
+                nome_forn = ""
                 if isinstance(resultado, list):
                     condicoes_lista = resultado
                 elif isinstance(resultado, dict):
-                    # Às vezes a IA retorna um objeto com uma chave "condicoes_extraidas"
+                    nome_forn = resultado.get("nome_fornecedor_email", "")
                     for k, v in resultado.items():
                         if isinstance(v, list):
                             condicoes_lista = v
@@ -78,6 +79,7 @@ if st.button("Extrair e Auditar Condições", type="primary"):
                         condicoes_lista = [resultado] # Se for um único objeto
                 
                 st.session_state['condicoes_extraidas'] = condicoes_lista
+                st.session_state['nome_fornecedor_email'] = nome_forn
                 st.session_state['processado'] = True
                 st.success(f"Extração concluída! {len(condicoes_lista)} condição(ões) encontrada(s).")
 
@@ -94,8 +96,8 @@ if st.session_state.get('processado', False):
             
             # --- Validação Inicial e Auditoria ---
             # Aqui chamamos o motor determinístico apenas para sugerir ou alertar
-            fornecedor_extraido = cond.get("fornecedor", "")
-            loja_extraida = cond.get("lojas", "")
+            fornecedor_extraido = st.session_state.get("nome_fornecedor_email", "") or cond.get("fornecedor", cond.get("nome_fornecedor_email", ""))
+            loja_extraida = cond.get("lojas_mencionadas", cond.get("lojas", ""))
             if isinstance(loja_extraida, list):
                 loja_extraida_str = ", ".join(str(x) for x in loja_extraida)
             else:
@@ -109,6 +111,7 @@ if st.session_state.get('processado', False):
                 cod_forn, cnpj_forn = erp_integration.validar_fornecedor(fornecedor_extraido)
                 cod_forn_sugerido = cod_forn
             except Exception as e:
+                cod_forn_sugerido = fornecedor_extraido
                 st.error(f"Erro ao validar Fornecedor: {e}. Edite manualmente abaixo.")
             
             # Validação Loja (tratando lista ou string)
@@ -127,6 +130,7 @@ if st.session_state.get('processado', False):
                 else:
                     loja_sugerida = erp_integration.validar_loja(loja_extraida_str)
             except Exception as e:
+                loja_sugerida = loja_extraida_str
                 st.error(f"Erro ao validar Loja: {e}. Edite manualmente abaixo.")
             
             # Auditoria inicial pela IA (apenas visualização)
