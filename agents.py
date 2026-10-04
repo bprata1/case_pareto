@@ -26,7 +26,7 @@ def extrair_condicoes(texto_email: str) -> dict:
         )
         
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-3.8-flash',
             contents=texto_email,
             config=config
         )
@@ -61,7 +61,7 @@ Política Comercial Vigente:
         )
         
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-3.8-flash',
             contents=input_ia,
             config=config
         )
