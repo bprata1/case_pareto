@@ -1,12 +1,18 @@
 import os
 import io
 import json
+import importlib
 import pandas as pd
 import streamlit as st
 
-import agents
-import erp_integration
 import database
+import erp_integration
+import agents
+
+# Forçar recarregamento dos módulos de backend a cada execução do Streamlit (evita cache antigo em sys.modules)
+importlib.reload(database)
+importlib.reload(erp_integration)
+importlib.reload(agents)
 
 st.set_page_config(
     page_title="Vitalis | Pareto AI Builder V5 - Condições Comerciais",
@@ -16,27 +22,46 @@ st.set_page_config(
 )
 
 # Épico 3.2: Injeção de CSS para aumentar o contraste e visibilidade do botão nativo de expandir a Sidebar
+# Cobre seletores do Streamlit 1.65+ (stExpandSidebarButton / stSidebarCollapseButton) e versões anteriores
 st.markdown(
     """
     <style>
+    [data-testid="stExpandSidebarButton"],
     [data-testid="collapsedControl"],
     [data-testid="stSidebarCollapsedControl"] {
         background-color: #1f6feb !important;
         color: #ffffff !important;
         border: 2px solid #0d419d !important;
         border-radius: 8px !important;
-        box-shadow: 0 2px 8px rgba(31, 111, 235, 0.45) !important;
-        padding: 4px 8px !important;
-        margin: 6px !important;
+        box-shadow: 0 2px 10px rgba(31, 111, 235, 0.55) !important;
+        padding: 4px 10px !important;
+        margin: 4px !important;
         transition: all 0.2s ease-in-out !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        gap: 6px !important;
     }
+    [data-testid="stExpandSidebarButton"]::after {
+        content: "Menu / Avaliador";
+        font-size: 0.82rem !important;
+        font-weight: 700 !important;
+        color: #ffffff !important;
+        letter-spacing: 0.2px !important;
+        padding-right: 4px !important;
+    }
+    [data-testid="stExpandSidebarButton"]:hover,
     [data-testid="collapsedControl"]:hover,
     [data-testid="stSidebarCollapsedControl"]:hover {
         background-color: #1158c7 !important;
-        transform: scale(1.06) !important;
+        transform: scale(1.04) !important;
     }
+    [data-testid="stExpandSidebarButton"] span,
+    [data-testid="stExpandSidebarButton"] svg,
+    [data-testid="collapsedControl"] span,
     [data-testid="collapsedControl"] svg,
+    [data-testid="stSidebarCollapsedControl"] span,
     [data-testid="stSidebarCollapsedControl"] svg {
+        color: #ffffff !important;
         fill: #ffffff !important;
         stroke: #ffffff !important;
     }
