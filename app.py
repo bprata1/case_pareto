@@ -54,8 +54,8 @@ def formatar_termo_humano(valor: str) -> str:
 
 def clear_form_state():
     """
-    Épico 4.1: Limpa exclusivamente o estado visual do formulário de ingestão e extração da UI
-    (evitando o 'fantasma' de dados antigos ao trocar de usuário ou após envio),
+    Limpa completamente o estado visual do formulário de ingestão, arquivos carregados e extração da UI,
+    destruindo qualquer cache anterior no `st.session_state` e forçando novas chaves de widgets,
     preservando intacto o banco SQLite e o usuário logado.
     """
     chaves_fixas_ui = [
@@ -66,6 +66,7 @@ def clear_form_state():
         "texto_bruto_atual",
         "processado",
         "uploaded_file",
+        "arquivos_carregados",
         "json_extraido",
     ]
     for k in chaves_fixas_ui:
@@ -75,13 +76,15 @@ def clear_form_state():
         "forn_", "cat_", "tipo_", "val_", "loja_",
         "dt_ini_", "dt_fim_", "contra_", "saz_", "subst_",
         "dl_analista_", "btn_fila_",
+        "uploader_", "caso_rapido_", "texto_livre_",
     )
     chaves_dinamicas = [k for k in list(st.session_state.keys()) if k.startswith(prefixos_dinamicos)]
     for k in chaves_dinamicas:
         st.session_state.pop(k, None)
 
-    # Incrementar contador de ciclo do formulário para resetar file_uploader, selectbox e text_area
+    # Incrementar contadores de geração para destruir qualquer cache de widget no frontend do Streamlit
     st.session_state["form_reset_counter"] = st.session_state.get("form_reset_counter", 0) + 1
+    st.session_state["extraction_gen"] = st.session_state.get("extraction_gen", 0) + 1
 
 
 def ler_arquivos_upload(uploaded_files) -> str:
@@ -186,31 +189,32 @@ def renderizar_sidebar():
             """)
 
         with st.expander("🛠️ Área do Avaliador", expanded=False):
-            st.markdown("**Logins Nominais de Teste (Senha: `123`):**")
+            st.info("🔑 **SENHA PADRÃO PARA TODOS OS USUÁRIOS: 123**")
+            st.markdown("**Logins Corporativos de Teste:**")
             st.markdown(
-                "- `renata.alves` — Analista Comercial\n"
-                "- `carlos.eduardo` — Coordenação Comercial\n"
-                "- `fernanda.lima` — Gerência Comercial\n"
-                "- `roberto.almeida` — Diretoria Comercial"
+                "- `renata.alves` — **Analista** Comercial\n"
+                "- `carlos.eduardo` — **Coordenador** Comercial\n"
+                "- `fernanda.lima` — **Gerente** Comercial\n"
+                "- `roberto.almeida` — **Diretor** Comercial"
             )
 
-            st.markdown("**Troca Rápida de Perfil (1-Click):**")
+            st.markdown("**Troca Rápida por Cargo/Alçada (1-Click):**")
             c_a, c_b = st.columns(2)
             with c_a:
-                if st.button("🧑‍💻 Renata", key="quick_ana", width="stretch"):
+                if st.button("🧑‍💻 Analista", key="quick_ana", width="stretch"):
                     clear_form_state()
                     st.session_state["usuario_logado"] = database.obter_usuario_por_username("renata.alves")
                     st.rerun()
-                if st.button("🏅 Fernanda", key="quick_ger", width="stretch"):
+                if st.button("🏅 Gerente", key="quick_ger", width="stretch"):
                     clear_form_state()
                     st.session_state["usuario_logado"] = database.obter_usuario_por_username("fernanda.lima")
                     st.rerun()
             with c_b:
-                if st.button("👔 Carlos", key="quick_coord", width="stretch"):
+                if st.button("👔 Coordenador", key="quick_coord", width="stretch"):
                     clear_form_state()
                     st.session_state["usuario_logado"] = database.obter_usuario_por_username("carlos.eduardo")
                     st.rerun()
-                if st.button("🏛️ Roberto", key="quick_dir", width="stretch"):
+                if st.button("🏛️ Diretor", key="quick_dir", width="stretch"):
                     clear_form_state()
                     st.session_state["usuario_logado"] = database.obter_usuario_por_username("roberto.almeida")
                     st.rerun()
@@ -269,7 +273,7 @@ def renderizar_tela_login():
 
 
 def processar_ingestao_texto(texto_contexto_completo: str):
-    """Executa o Agente 1 (Extrator) e prepara o estado da sessão com detecção de Edge Cases."""
+    """Executa o Agente 1 (Extrator) e prepara o estado da sessão limpa com detecção de Edge Cases."""
     with st.spinner("🤖 Agente Extrator e Motor Determinístico analisando negociação..."):
         inj_check = erp_integration.detectar_prompt_injection(texto_contexto_completo)
         resultado = agents.extrair_condicoes(texto_contexto_completo)
@@ -299,10 +303,8 @@ def processar_ingestao_texto(texto_contexto_completo: str):
             if not condicoes_lista and "tipo_condicao" in resultado:
                 condicoes_lista = [resultado]
 
-        # Limpar widgets antigos de edição para carregar os novos valores extraídos
-        prefixos_dinamicos = ("forn_", "cat_", "tipo_", "val_", "loja_", "dt_ini_", "dt_fim_", "contra_", "saz_", "subst_")
-        for k in [k for k in list(st.session_state.keys()) if k.startswith(prefixos_dinamicos)]:
-            st.session_state.pop(k, None)
+        # Destruir qualquer cache de extração/widgets anterior antes de gravar os novos dados
+        clear_form_state()
 
         st.session_state["condicoes_extraidas"] = condicoes_lista
         st.session_state["nome_fornecedor_email"] = nome_forn
@@ -375,7 +377,7 @@ def renderizar_visao_analista(usuario: dict):
                     texto_contexto = ""
                     if arquivos:
                         texto_contexto += ler_arquivos_upload(arquivos)
-                    if caso_rapido and not caso_rapido.startswith("--"):
+                    elif caso_rapido and not caso_rapido.startswith("--"):
                         texto_contexto += carregar_caso_dataset(caso_rapido)
                     if texto_livre and texto_livre.strip():
                         texto_contexto += f"\n--- Texto Colado Manualmente ---\n{texto_livre}\n"
@@ -384,6 +386,7 @@ def renderizar_visao_analista(usuario: dict):
                         st.warning("⚠️ Por favor, faça upload de um arquivo, selecione um caso de teste ou cole o texto do e-mail.")
                     else:
                         processar_ingestao_texto(texto_contexto)
+                        st.rerun()
             with c_btn2:
                 if st.button("🧹 Limpar Formulário", width="stretch"):
                     clear_form_state()
@@ -468,13 +471,15 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
         if cond.get("divergencia_detectada"):
             st.warning(f"📊 **Divergência E-mail vs. Planilha Anexa Detectada:** {cond.get('divergencia_detectada')}")
 
+        gen = st.session_state.get("extraction_gen", 0)
+
         st.markdown("#### ✏️ Formulário de Revisão e Ajuste (Sobrescreve Alucinações da IA)")
         c1, c2, c3 = st.columns(3)
         with c1:
             edit_forn = st.text_input(
                 "Fornecedor (Código FORN-### ou Nome)",
                 value=forn_default,
-                key=f"forn_{i}",
+                key=f"forn_{gen}_{i}",
                 help="Aceita código (ex: FORN-001) ou nome parcial/aproximado (ex: Alfa Pharma, Distribuidora Beta).",
             )
             edit_cat = st.selectbox(
@@ -482,12 +487,12 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
                 options=erp_integration.CATEGORIAS_VALIDAS,
                 index=erp_integration.CATEGORIAS_VALIDAS.index(cat_inicial_norm),
                 format_func=formatar_termo_humano,
-                key=f"cat_{i}",
+                key=f"cat_{gen}_{i}",
             )
             edit_sazonal = st.checkbox(
                 "🎄 Campanha Sazonal (Trade Marketing)",
                 value=sazonal_default,
-                key=f"saz_{i}",
+                key=f"saz_{gen}_{i}",
                 help="Permite teto de até 30% para Genéricos e MIP conforme Nota (*) da Política Comercial.",
             )
 
@@ -498,7 +503,7 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
                 options=opcoes_tipo,
                 index=0 if tipo_inicial == "DESCONTO_PERCENTUAL" else 1,
                 format_func=formatar_termo_humano,
-                key=f"tipo_{i}",
+                key=f"tipo_{gen}_{i}",
             )
             label_val = "Percentual de Desconto (%)" if edit_tipo == "DESCONTO_PERCENTUAL" else "Valor da Verba (R$)"
             edit_valor = st.number_input(
@@ -507,12 +512,12 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
                 value=val_default,
                 step=0.5 if edit_tipo == "DESCONTO_PERCENTUAL" else 100.0,
                 format="%.2f",
-                key=f"val_{i}",
+                key=f"val_{gen}_{i}",
             )
             edit_contra = st.text_input(
                 "Contrapartida Acordada",
                 value=contra_default,
-                key=f"contra_{i}",
+                key=f"contra_{gen}_{i}",
                 placeholder="Ex: Ponta de gôndola / Ilha promocional...",
             )
 
@@ -520,18 +525,18 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
             edit_loja = st.text_input(
                 "Lojas (Códigos LOJA-###, Nomes ou REDE)",
                 value=loja_default,
-                key=f"loja_{i}",
+                key=f"loja_{gen}_{i}",
                 help="Aceita 'REDE', códigos separados por vírgula ('LOJA-101, LOJA-102') ou nomes das filiais ('Copacabana, Méier').",
             )
             edit_dt_ini = st.text_input(
                 "Data de Início (YYYY-MM-DD)",
                 value=dt_ini_default,
-                key=f"dt_ini_{i}",
+                key=f"dt_ini_{gen}_{i}",
             )
             edit_dt_fim = st.text_input(
                 "Data de Fim (YYYY-MM-DD)",
                 value=dt_fim_default,
-                key=f"dt_fim_{i}",
+                key=f"dt_fim_{gen}_{i}",
             )
 
         # --- MOTOR DE VALIDAÇÃO DETERMINÍSTICA EM TEMPO REAL (7 EDGE CASES + DUPLICIDADE SQLITE) ---
@@ -591,6 +596,7 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
             data_inicio_str=edit_dt_ini,
             data_fim_str=edit_dt_fim,
             tipo_condicao=edit_tipo,
+            valor_proposto=edit_valor,
         )
         if sobreposicao["tem_conflito"]:
             erros_bloqueantes.append(
@@ -668,7 +674,7 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
                 data=json_str_download.encode("utf-8"),
                 file_name=f"payload_{cod_forn_valido}_{edit_cat}_{i+1}.json",
                 mime="application/json",
-                key=f"dl_analista_{i}",
+                key=f"dl_analista_{gen}_{i}",
             )
 
         # Botão de Envio para a Fila de Aprovação (SQLite)
@@ -687,6 +693,7 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
                 data_inicio_str=edit_dt_ini,
                 data_fim_str=edit_dt_fim,
                 tipo_condicao=edit_tipo,
+                valor_proposto=edit_valor,
             )
             ok_schema, erros_schema = erp_integration.validar_schema_payload(payload_preview)
             if recheck_sob["tem_conflito"]:
@@ -718,27 +725,25 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
 
                 msg_sucesso = (
                     f"🎉 Condição enviada com sucesso para a **Fila de Aprovação** sob o protocolo **#{novo_id}** "
-                    f"(Alçada: **{aval_pol['alcada_exibicao']}**)! O formulário foi limpo para evitar duplicidade."
+                    f"(Alçada: **{aval_pol['alcada_exibicao']}**)! O cache e o formulário foram limpos."
                 )
 
-                # Épico 4: Se for condição única (ou a última restante), limpar completamente o formulário imediatamente
-                if total_condicoes <= 1:
-                    clear_form_state()
-                    st.session_state["flash_sucesso_fila"] = msg_sucesso
-                    st.rerun()
-                else:
-                    # Caso existam múltiplas condições no mesmo e-mail (ex: Gama), remover a condição já enviada da lista ativa
-                    restantes = [c for idx, c in enumerate(st.session_state.get("condicoes_extraidas", [])) if idx != i]
-                    if not restantes:
-                        clear_form_state()
-                    else:
-                        # Limpar chaves dinâmicas de widgets para reindexar o item restante sem conflito
-                        prefixos_din = ("forn_", "cat_", "tipo_", "val_", "loja_", "dt_ini_", "dt_fim_", "contra_", "saz_", "subst_")
-                        for k in [k for k in list(st.session_state.keys()) if k.startswith(prefixos_din)]:
-                            st.session_state.pop(k, None)
-                        st.session_state["condicoes_extraidas"] = restantes
-                    st.session_state["flash_sucesso_fila"] = msg_sucesso
-                    st.rerun()
+                # Verificar se há condição irmã restante (caso de condições mistas no mesmo e-mail)
+                restantes = [c for idx, c in enumerate(st.session_state.get("condicoes_extraidas", [])) if idx != i]
+                forn_salvo = st.session_state.get("nome_fornecedor_email", "")
+                msg_id_salvo = st.session_state.get("message_id_email", "EMAIL_MANUAL")
+
+                # Chamar obrigatoriamente a limpeza total do estado do formulário antes do rerun
+                clear_form_state()
+
+                if total_condicoes > 1 and restantes:
+                    st.session_state["condicoes_extraidas"] = restantes
+                    st.session_state["nome_fornecedor_email"] = forn_salvo
+                    st.session_state["message_id_email"] = msg_id_salvo
+                    st.session_state["processado"] = True
+
+                st.session_state["flash_sucesso_fila"] = msg_sucesso
+                st.rerun()
 
 
 def renderizar_visao_aprovador(usuario: dict):

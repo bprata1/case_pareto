@@ -532,6 +532,32 @@ def validar_vigencia(data_inicio_str: str, data_fim_str: str, data_referencia: d
     }
 
 
+def _formatar_valor_condicao_texto(tipo_str: str, valor_raw) -> tuple:
+    """
+    Auxiliar para formatar o valor da condição de forma legível (ex: '10% de desconto' ou 'R$ 4.500,00 de verba')
+    e retornar também o float correspondente para comparação numérica.
+    """
+    try:
+        if isinstance(valor_raw, str):
+            v_limpo = valor_raw.replace("R$", "").replace(".", "").replace(",", ".").strip() if "," in valor_raw else valor_raw.strip()
+            val_num = float(v_limpo)
+        else:
+            val_num = float(valor_raw)
+    except Exception:
+        val_num = 0.0
+
+    tipo_u = str(tipo_str or "").upper()
+    if "VERBA" in tipo_u:
+        val_fmt = f"R$ {val_num:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return f"{val_fmt} de verba de exposição", val_num
+    else:
+        if abs(val_num - round(val_num)) < 0.001:
+            pct_fmt = f"{int(round(val_num))}%"
+        else:
+            pct_fmt = f"{val_num:.2f}%".replace(".", ",")
+        return f"{pct_fmt} de desconto", val_num
+
+
 def verificar_sobreposicao_extrato(
     cod_fornecedor: str,
     cod_categoria: str,
@@ -539,14 +565,15 @@ def verificar_sobreposicao_extrato(
     data_inicio_str: str,
     data_fim_str: str,
     cod_condicao_substituida: str = None,
-    tipo_condicao: str = None
+    tipo_condicao: str = None,
+    valor_proposto: float = None
 ) -> dict:
     """
-    Edge Case 6 (Regra 9 - Sobreposição Contratual) + Épico 3 V3 (Prevenção de Duplicidade no SQLite):
+    Edge Case 6 (Regra 9 - Sobreposição Contratual) + Prevenção de Duplicidade no SQLite:
     1. Cruza os parâmetros com `dataset/extrato_erp.csv` (onde STATUS == 'VIGENTE').
     2. Consulta também o banco SQLite local (`fila_aprovacao` onde status_fila IN ('PENDENTE', 'APROVADO')).
-    Se o mesmo fornecedor, categoria e loja tiverem datas conflitantes/sobrepostas ou condição já cadastrada,
-    retorna os detalhes do conflito para barrar o cadastro.
+    Retorna mensagem comparativa rica detalhando o que já está vigente no ERP vs. o que a nova proposta tenta aplicar,
+    ou informando quando se trata de uma condição exatamente igual.
     """
     conflitos = []
     if not cod_fornecedor or not cod_categoria or not lojas or not data_inicio_str or not data_fim_str:
@@ -562,7 +589,7 @@ def verificar_sobreposicao_extrato(
     cod_cat_upper = normalizar_categoria(cod_categoria)
     lojas_upper = [str(l).strip().upper() for l in lojas if str(l).strip()]
     cond_subst_upper = str(cod_condicao_substituida).strip().upper() if cod_condicao_substituida else ""
-    tipo_upper = str(tipo_condicao).strip().upper() if tipo_condicao else ""
+    tipo_upper = str(tipo_condicao).strip().upper() if tipo_condicao else "DESCONTO_PERCENTUAL"
 
     conflitos_por_cond = {}
     duplicidade_sqlite = False
@@ -611,8 +638,10 @@ def verificar_sobreposicao_extrato(
                     "lojas_conflitantes": [],
                     "data_inicio": dt_ini_csv.strftime("%Y-%m-%d"),
                     "data_fim": dt_fim_csv.strftime("%Y-%m-%d"),
-                    "tipo": row.get("TP_COND", ""),
-                    "valor_atual": row.get("VLR_PCT") or row.get("VLR_BRL") or "",
+                    "data_inicio_br": dt_ini_csv.strftime("%d/%m/%Y"),
+                    "data_fim_br": dt_fim_csv.strftime("%d/%m/%Y"),
+                    "tipo": row.get("TP_COND", "DESC"),
+                    "valor_atual": row.get("VLR_PCT") or row.get("VLR_BRL") or "0",
                 }
             if loja_row not in conflitos_por_cond[cond_id]["lojas_conflitantes"]:
                 conflitos_por_cond[cond_id]["lojas_conflitantes"].append(loja_row)
@@ -630,7 +659,7 @@ def verificar_sobreposicao_extrato(
                 continue
 
             # Permitir coexistência apenas quando for componente distinto de condição mista (Regra 5: Desconto vs Verba)
-            if tipo_upper and tipo_db and tipo_upper != tipo_db:
+            if tipo_condicao and tipo_db and tipo_upper != tipo_db:
                 continue
 
             try:
@@ -665,36 +694,53 @@ def verificar_sobreposicao_extrato(
                     "lojas_conflitantes": lojas_intersec,
                     "data_inicio": dt_ini_db.strftime("%Y-%m-%d"),
                     "data_fim": dt_fim_db.strftime("%Y-%m-%d"),
+                    "data_inicio_br": dt_ini_db.strftime("%d/%m/%Y"),
+                    "data_fim_br": dt_fim_db.strftime("%d/%m/%Y"),
                     "tipo": tipo_db,
-                    "valor_atual": str(item.get("valor", "")),
+                    "valor_atual": item.get("valor", 0.0),
                 }
     except Exception as e:
         print(f"Aviso ao verificar duplicidade no SQLite: {e}")
 
     conflitos = list(conflitos_por_cond.values())
     if conflitos:
-        resumo = "; ".join([
-            f"{c['cod_condicao']} [Status: {c['status_registro']}] "
-            f"(Lojas: {', '.join(c['lojas_conflitantes'])}, Vigência: {c['data_inicio']} a {c['data_fim']})"
-            for c in conflitos
-        ])
-        if duplicidade_sqlite:
-            msg = (
-                f"Atenção: Esta condição já existe no ERP / Fila de Aprovação! "
-                f"Fornecedor {cod_forn_upper}, categoria {cod_cat_upper}, com período e loja(s) já registrados em: {resumo}. "
-                f"O envio em duplicidade foi bloqueado para evitar retrabalho operacional."
-            )
-        else:
-            msg = (
-                f"Atenção: Esta condição já existe no ERP (`extrato_erp.csv` — Regra 9)! "
-                f"Já existe(m) condição(ões) VIGENTE(S) para {cod_forn_upper} na categoria {cod_cat_upper} "
-                f"no mesmo período e loja(s): {resumo}."
-            )
+        mensagens_detalhadas = []
+        dt_ini_nova_iso = dt_ini_nova.strftime("%Y-%m-%d")
+        dt_fim_nova_iso = dt_fim_nova.strftime("%Y-%m-%d")
+        dt_ini_nova_br = dt_ini_nova.strftime("%d/%m/%Y")
+        dt_fim_nova_br = dt_fim_nova.strftime("%d/%m/%Y")
+
+        for c in conflitos:
+            txt_val_exist, num_val_exist = _formatar_valor_condicao_texto(c["tipo"], c["valor_atual"])
+            lojas_str = ", ".join(c["lojas_conflitantes"])
+
+            if valor_proposto is not None:
+                txt_val_prop, num_val_prop = _formatar_valor_condicao_texto(tipo_upper, valor_proposto)
+            else:
+                txt_val_prop, num_val_prop = ("nova condição comercial", None)
+
+            mesmo_valor = (num_val_prop is not None and abs(num_val_exist - num_val_prop) < 0.001)
+            mesmo_periodo = (c["data_inicio"] == dt_ini_nova_iso and c["data_fim"] == dt_fim_nova_iso)
+
+            if mesmo_valor and mesmo_periodo:
+                mensagens_detalhadas.append(
+                    f"Atenção: Uma condição exatamente igual ({txt_val_exist} até {c['data_fim']} / {c['data_fim_br']} — "
+                    f"registro {c['cod_condicao']}, lojas: {lojas_str}) já está vigente no ERP. "
+                    f"Ação bloqueada por duplicidade."
+                )
+            else:
+                mensagens_detalhadas.append(
+                    f"Atenção: A condição {c['cod_condicao']} já está vigente para este fornecedor e lojas ({lojas_str}) "
+                    f"até {c['data_fim_br']} ({c['data_fim']}) com {txt_val_exist}. "
+                    f"A nova proposta tenta aplicar {txt_val_prop} no mesmo período ({dt_ini_nova_br} a {dt_fim_nova_br}). "
+                    f"Ação bloqueada por sobreposição."
+                )
+
         return {
             "tem_conflito": True,
             "duplicidade_sqlite": duplicidade_sqlite,
             "conflitos": conflitos,
-            "mensagem": msg
+            "mensagem": " | ".join(mensagens_detalhadas),
         }
 
     return {"tem_conflito": False, "duplicidade_sqlite": False, "conflitos": [], "mensagem": ""}
