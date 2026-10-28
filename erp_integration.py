@@ -566,7 +566,8 @@ def verificar_sobreposicao_extrato(
     data_fim_str: str,
     cod_condicao_substituida: str = None,
     tipo_condicao: str = None,
-    valor_proposto: float = None
+    valor_proposto: float = None,
+    ignorar_id_sqlite: int = None,
 ) -> dict:
     """
     Edge Case 6 (Regra 9 - Sobreposição Contratual) + Prevenção de Duplicidade no SQLite:
@@ -649,7 +650,7 @@ def verificar_sobreposicao_extrato(
     # 2. Verificar também no banco de dados SQLite (itens APROVADOS ou PENDENTES na fila)
     try:
         import database
-        itens_sqlite = database.listar_condicoes_ativas_sqlite()
+        itens_sqlite = database.listar_condicoes_ativas_sqlite(ignorar_id=ignorar_id_sqlite)
         for item in itens_sqlite:
             forn_db = str(item.get("cod_fornecedor", "")).strip().upper()
             cat_db = normalizar_categoria(item.get("cod_categoria", ""))
@@ -775,6 +776,128 @@ def verificar_sobreposicao_extrato(
 
 
 validar_sobreposicao = verificar_sobreposicao_extrato
+
+
+def obter_contexto_substituicao_erp(item: dict) -> dict:
+    """
+    Épico 2 (Missão V6) — Detalhamento de Substituições na Fila de Aprovação:
+    Cruza os dados de um item da fila (fornecedor, categoria, lojas, datas e cod_condicao_substituida)
+    com o `extrato_erp.csv` (e SQLite) para retornar o comparativo explícito entre a Condição Vigente
+    e a Nova Proposta (ex: 'Condição Vigente: 10% | Nova Proposta: 12%'), além da justificativa do Analista.
+    """
+    if not item:
+        return {"eh_substituicao": False}
+
+    just_analista = str(item.get("justificativa_analista") or "").strip()
+    cod_subst = str(item.get("cod_condicao_substituida") or "").strip().upper()
+    if cod_subst.lower() == "none" or cod_subst.lower() == "null":
+        cod_subst = ""
+
+    cod_forn = str(item.get("cod_fornecedor") or "").strip().upper()
+    cod_cat = normalizar_categoria(item.get("cod_categoria") or "")
+    tipo_prop = str(item.get("tipo") or "DESCONTO_PERCENTUAL").strip().upper()
+    val_prop = item.get("valor", 0.0)
+
+    try:
+        lojas_item = json.loads(item.get("lojas_json", "[]")) if isinstance(item.get("lojas_json"), str) else (item.get("lojas") or [])
+        lojas_upper = [str(x).strip().upper() for x in lojas_item if str(x).strip()]
+    except Exception:
+        lojas_upper = []
+
+    try:
+        dt_ini_prop = datetime.strptime(str(item.get("data_inicio", "")).strip()[:10], "%Y-%m-%d").date()
+        dt_fim_prop = datetime.strptime(str(item.get("data_fim", "")).strip()[:10], "%Y-%m-%d").date()
+    except Exception:
+        dt_ini_prop = None
+        dt_fim_prop = None
+
+    txt_prop_longo, num_prop = _formatar_valor_condicao_texto(tipo_prop, val_prop)
+    if "VERBA" in tipo_prop:
+        txt_prop_curto = f"R$ {num_prop:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    else:
+        txt_prop_curto = f"{int(round(num_prop))}%" if abs(num_prop - round(num_prop)) < 0.001 else f"{num_prop:.2f}%".replace(".", ",")
+
+    conflito_erp = None
+
+    # 1. Procurar no extrato_erp.csv pelo cod_condicao_substituida ou por sobreposição de vigência/loja
+    lojas_conflitantes = []
+    for row in EXTRATO_ERP:
+        if str(row.get("STATUS", "")).strip().upper() != "VIGENTE":
+            continue
+        cond_id = str(row.get("COND_ID", "")).strip().upper()
+        forn_row = str(row.get("COD_FORN", "")).strip().upper()
+        cat_row = str(row.get("CATEG", "")).strip().upper()
+        loja_row = str(row.get("COD_LOJA", "")).strip().upper()
+
+        match_direto = (cod_subst and cond_id == cod_subst)
+        match_parametros = False
+
+        if not match_direto and forn_row == cod_forn and cat_row == cod_cat:
+            loja_ok = (loja_row == "REDE" or "REDE" in lojas_upper or loja_row in lojas_upper)
+            if loja_ok and dt_ini_prop and dt_fim_prop:
+                try:
+                    d_i = datetime.strptime(str(row.get("DT_INI", "")).strip(), "%Y%m%d").date()
+                    d_f = datetime.strptime(str(row.get("DT_FIM", "")).strip(), "%Y%m%d").date()
+                    if dt_ini_prop <= d_f and dt_fim_prop >= d_i:
+                        match_parametros = True
+                except Exception:
+                    pass
+
+        if match_direto or match_parametros:
+            if conflito_erp is None:
+                try:
+                    d_i_fmt = datetime.strptime(str(row.get("DT_INI", "")).strip(), "%Y%m%d").strftime("%d/%m/%Y")
+                    d_f_fmt = datetime.strptime(str(row.get("DT_FIM", "")).strip(), "%Y%m%d").strftime("%d/%m/%Y")
+                except Exception:
+                    d_i_fmt = str(row.get("DT_INI", ""))
+                    d_f_fmt = str(row.get("DT_FIM", ""))
+
+                val_raw_csv = row.get("VLR_PCT") or row.get("VLR_BRL") or "0"
+                tp_csv = row.get("TP_COND", "DESC")
+                txt_vig_longo, num_vig = _formatar_valor_condicao_texto(tp_csv, val_raw_csv)
+                if "VERBA" in str(tp_csv).upper():
+                    txt_vig_curto = f"R$ {num_vig:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                else:
+                    txt_vig_curto = f"{int(round(num_vig))}%" if abs(num_vig - round(num_vig)) < 0.001 else f"{num_vig:.2f}%".replace(".", ",")
+
+                conflito_erp = {
+                    "cod_condicao": cond_id,
+                    "valor_vigente_curto": txt_vig_curto,
+                    "valor_vigente_longo": txt_vig_longo,
+                    "data_inicio_br": d_i_fmt,
+                    "data_fim_br": d_f_fmt,
+                }
+            if ( not lojas_upper or loja_row in lojas_upper or "REDE" in lojas_upper or loja_row == "REDE" ) and loja_row not in lojas_conflitantes:
+                lojas_conflitantes.append(loja_row)
+
+    eh_subst = bool(just_analista or cod_subst or conflito_erp)
+    if not eh_subst:
+        return {"eh_substituicao": False}
+
+    if conflito_erp:
+        cod_ref = conflito_erp["cod_condicao"]
+        lojas_txt = ", ".join(lojas_conflitantes) if lojas_conflitantes else ", ".join(lojas_upper)
+        comparativo_curto = (
+            f"Condição Vigente ({cod_ref}): {conflito_erp['valor_vigente_curto']} | "
+            f"Nova Proposta: {txt_prop_curto}"
+        )
+        detalhe_erp = (
+            f"Contrato atual `{cod_ref}` no ERP aplica **{conflito_erp['valor_vigente_longo']}** "
+            f"nas lojas `{lojas_txt}` (vigência `{conflito_erp['data_inicio_br']}` a `{conflito_erp['data_fim_br']}`). "
+            f"A nova proposta substitui para **{txt_prop_longo}**."
+        )
+    else:
+        cod_ref = cod_subst or "VIGENTE-ERP"
+        comparativo_curto = f"Substituição de Condição Vigente ({cod_ref}) | Nova Proposta: {txt_prop_curto}"
+        detalhe_erp = f"Solicitação de substituição/override para aplicar **{txt_prop_longo}**."
+
+    return {
+        "eh_substituicao": True,
+        "cod_condicao_substituida": cod_ref,
+        "comparativo_curto": comparativo_curto,
+        "detalhe_erp": detalhe_erp,
+        "justificativa_analista": just_analista or "Substituição de condição vigente identificada no extrato do ERP.",
+    }
 
 
 def detectar_prompt_injection(texto: str) -> dict:

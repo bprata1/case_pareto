@@ -123,6 +123,7 @@ def clear_form_state():
         "uploaded_file",
         "arquivos_carregados",
         "json_extraido",
+        "correcao_rejeicao_ativa",
     ]
     for k in chaves_fixas_ui:
         st.session_state.pop(k, None)
@@ -140,6 +141,61 @@ def clear_form_state():
     # Incrementar contadores de geração para destruir qualquer cache de widget no frontend do Streamlit
     st.session_state["form_reset_counter"] = st.session_state.get("form_reset_counter", 0) + 1
     st.session_state["extraction_gen"] = st.session_state.get("extraction_gen", 0) + 1
+
+
+def iniciar_correcao_condicao_rejeitada(item: dict):
+    """
+    Épico 3 (Missão V6): Carrega os dados de uma condição REJEITADA de volta para o formulário
+    de Ingestão (Seção 1 e 2) do Analista e ativa o alerta persistente com o `motivo_rejeicao`.
+    """
+    clear_form_state()
+
+    try:
+        lojas_lista = json.loads(item.get("lojas_json", "[]"))
+    except Exception:
+        lojas_lista = [item.get("lojas_json", "")]
+
+    motivo_rej = (
+        str(item.get("motivo_rejeicao") or "").strip()
+        or str(item.get("observacao_decisao") or "").strip()
+        or "Solicitada revisão dos parâmetros comerciais pelo aprovador."
+    )
+    just_antiga = str(item.get("justificativa_analista") or "").strip()
+    cod_subst_antigo = item.get("cod_condicao_substituida")
+
+    cond_reconstruida = {
+        "fornecedor": item.get("cod_fornecedor", ""),
+        "nome_fornecedor_email": item.get("cod_fornecedor", ""),
+        "categoria": item.get("cod_categoria", "GENERICOS"),
+        "tipo_condicao": item.get("tipo", "DESCONTO_PERCENTUAL"),
+        "valor_extraido": float(item.get("valor", 0.0)),
+        "lojas_mencionadas": lojas_lista,
+        "data_inicio": item.get("data_inicio", ""),
+        "data_fim": item.get("data_fim", ""),
+        "contrapartida": item.get("contrapartida") or "",
+        "campanha_sazonal": (item.get("status_politica") == "EXCECAO_SAZONAL"),
+        "justificativa_analista": just_antiga,
+        "cod_condicao_substituida": cod_subst_antigo,
+        "solicitar_subst_default": bool(just_antiga or cod_subst_antigo),
+    }
+
+    st.session_state["condicoes_extraidas"] = [cond_reconstruida]
+    st.session_state["nome_fornecedor_email"] = item.get("cod_fornecedor", "")
+    st.session_state["message_id_email"] = item.get("origem_referencia", f"CORRECAO_PROTOCOLO_{item['id']}")
+    st.session_state["processado"] = True
+    st.session_state["correcao_rejeicao_ativa"] = {
+        "id": item["id"],
+        "cod_fornecedor": item.get("cod_fornecedor", ""),
+        "razao_social": item.get("razao_social", ""),
+        "motivo_rejeicao": motivo_rej,
+        "aprovado_por": item.get("aprovado_por") or "Gestor Aprovador",
+        "aprovado_em": item.get("aprovado_em") or "",
+    }
+    st.session_state["redirecionar_aba_analista"] = "1️⃣ Ingestão e Auditoria de Condições"
+    st.session_state["toast_pendente"] = (
+        f"📝 Protocolo #{item['id']} carregado na aba de Ingestão para correção!",
+        "✏️",
+    )
 
 
 def ler_arquivos_upload(uploaded_files) -> str:
@@ -198,15 +254,129 @@ def carregar_caso_dataset(opcao: str) -> str:
     return texto
 
 
+def renderizar_central_notificacoes_sidebar(usuario: dict):
+    """
+    Épico 4 (Missão V6): Central de Notificações na barra lateral (`st.sidebar`),
+    posicionada acima da Área do Avaliador.
+    - Para o Analista: mostra condições APROVADAS ou REJEITADAS (com snippet do motivo).
+    - Para os Gestores: mostra resumo de condições aguardando aprovação e lista clicável.
+    - Cada item é clicável e direciona o usuário para a tela/filtro relevante.
+    """
+    with st.expander("🔔 Notificações Recentes", expanded=True):
+        if not usuario:
+            st.caption("Autentique-se para visualizar suas notificações corporativas em tempo real.")
+            return
+
+        dados_notif = database.obter_notificacoes_recentes(usuario, limite=5)
+        role = str(usuario.get("role", "analista")).strip().lower()
+        resumo = dados_notif.get("resumo", "")
+        itens = dados_notif.get("itens", [])
+
+        if role == "analista":
+            if dados_notif.get("tot_rejeitadas", 0) > 0:
+                st.warning(resumo)
+            elif dados_notif.get("tot_aprovadas", 0) > 0:
+                st.success(resumo)
+            else:
+                st.caption(resumo)
+
+            if not itens:
+                st.caption("Nenhuma decisão (aprovação/rejeição) registrada ainda.")
+            else:
+                st.caption("Clique em uma notificação para abrir o item:")
+                for it in itens:
+                    st_item = it["status_fila"]
+                    icone = "✅" if st_item == "APROVADO" else "❌"
+                    motivo_raw = str(it.get("motivo_rejeicao") or it.get("observacao_decisao") or "").strip()
+                    snippet = (motivo_raw[:42] + "...") if len(motivo_raw) > 42 else motivo_raw
+
+                    if st_item == "REJEITADO":
+                        label_btn = f"{icone} #{it['id']} {it['cod_fornecedor']} — Reprovada: \"{snippet or 'Ver motivo'}\""
+                    else:
+                        label_btn = f"{icone} #{it['id']} {it['cod_fornecedor']} — Aprovada ({it.get('aprovado_por', 'Gestor')[:18]})"
+
+                    if st.button(label_btn, key=f"notif_ana_{it['id']}_{st_item}", width="stretch"):
+                        st.session_state["redirecionar_aba_analista"] = "🏛️ Fila de Aprovação (Acompanhamento em Tempo Real)"
+                        st.session_state["redirecionar_filtro_status"] = st_item
+                        st.session_state["protocolo_destacado_id"] = it["id"]
+                        st.session_state["toast_pendente"] = (
+                            f"🔔 Visualizando Protocolo #{it['id']} ({formatar_termo_humano(st_item)})",
+                            icone,
+                        )
+                        st.rerun()
+        else:
+            pend_estrito = dados_notif.get("pendentes_estrito", 0)
+            pend_hier = dados_notif.get("pendentes_hierarquia", 0)
+
+            if pend_estrito > 0:
+                if st.button(
+                    f"📥 {resumo}",
+                    key=f"notif_resumo_ges_{role}",
+                    type="primary",
+                    width="stretch",
+                ):
+                    st.session_state["redirecionar_escopo_fila"] = "Apenas minha alçada de aprovação"
+                    st.session_state["redirecionar_filtro_status"] = "PENDENTE"
+                    st.session_state["toast_pendente"] = (
+                        f"🔔 Filtrando {pend_estrito} condição(ões) pendente(s) na sua alçada direta!",
+                        "📥",
+                    )
+                    st.rerun()
+            elif pend_hier > 0:
+                if st.button(
+                    f"📋 {resumo}",
+                    key=f"notif_resumo_hier_{role}",
+                    width="stretch",
+                ):
+                    st.session_state["redirecionar_escopo_fila"] = "Visão Geral (Minha Hierarquia)"
+                    st.session_state["redirecionar_filtro_status"] = "PENDENTE"
+                    st.session_state["toast_pendente"] = (
+                        f"🔔 Exibindo {pend_hier} condição(ões) pendente(s) na sua hierarquia!",
+                        "📋",
+                    )
+                    st.rerun()
+            else:
+                st.caption(resumo)
+
+            if itens:
+                st.caption("Últimas demandas na fila (clique para abrir):")
+                nivel_user = database.HIERARQUIA_CARGOS.get(role, 2)
+                for it in itens:
+                    st_item = it["status_fila"]
+                    ic_st = {"PENDENTE": "⏳", "APROVADO": "✅", "REJEITADO": "❌"}.get(st_item, "📋")
+                    val_curto = (
+                        f"{it['valor']:.0f}%"
+                        if it["tipo"] == "DESCONTO_PERCENTUAL"
+                        else f"R$ {it['valor']:,.0f}"
+                    )
+                    lbl = f"{ic_st} #{it['id']} {it['cod_fornecedor']} ({val_curto}) — {formatar_termo_humano(st_item)}"
+                    if st.button(lbl, key=f"notif_ges_{role}_{it['id']}", width="stretch"):
+                        if int(it.get("nivel_hierarquia", 2)) == nivel_user:
+                            st.session_state["redirecionar_escopo_fila"] = "Apenas minha alçada de aprovação"
+                        elif int(it.get("nivel_hierarquia", 2)) < nivel_user:
+                            st.session_state["redirecionar_escopo_fila"] = "Visão Geral (Minha Hierarquia)"
+                        else:
+                            st.session_state["redirecionar_escopo_fila"] = "Todos"
+                        st.session_state["redirecionar_filtro_status"] = st_item
+                        st.session_state["protocolo_destacado_id"] = it["id"]
+                        st.session_state["toast_pendente"] = (
+                            f"🔔 Abrindo Protocolo #{it['id']} ({it['cod_fornecedor']})",
+                            ic_st,
+                        )
+                        st.rerun()
+
+
 def renderizar_sidebar():
     """
-    Renderiza a barra lateral com sessão do usuário e as duas abas laterais recolhíveis:
-    1) Guia de Perfis e Alçadas (POL-COM-004)
-    2) Área do Avaliador (Credenciais Nominais, Troca Rápida e Reset do Banco)
+    Renderiza a barra lateral com:
+    - Identificação do usuário logado
+    - 🔔 Notificações Recentes (Épico 4 V6 - acima da Área do Avaliador)
+    - 🧭 Guia de Perfis e Alçadas (POL-COM-004)
+    - 🛠️ Área do Avaliador (Credenciais Nominais, Troca Rápida por Cargo e Reset do Banco)
     """
     with st.sidebar:
         st.markdown("## 💊 Vitalis Comercial")
-        st.caption("Sistema Corporativo de Gestão de Condições Comerciais e Compliance (V3)")
+        st.caption("Sistema Corporativo de Gestão de Condições Comerciais e Compliance (V6)")
         st.divider()
 
         usuario = st.session_state.get("usuario_logado")
@@ -232,12 +402,17 @@ def renderizar_sidebar():
             st.info("🔒 Autentique-se na tela principal ou utilize os recursos da barra lateral abaixo.")
 
         st.divider()
+
+        # Épico 4 (Missão V6): Central de Notificações acima da Área do Avaliador
+        renderizar_central_notificacoes_sidebar(usuario)
+
+        st.divider()
         st.caption("📚 *Documentação de Alçadas e Governança de Testes:*")
 
         with st.expander("🧭 Guia de Perfis e Alçadas (POL-COM-004)", expanded=False):
             st.markdown("""
 **Regras de Visibilidade e Aprovação:**
-- **Analista (`renata.alves`):** Realiza a ingestão de e-mails/planilhas, audita alertas e envia para a fila. Também acompanha a Fila de Aprovação em modo leitura.
+- **Analista (`renata.alves`):** Realiza a ingestão de e-mails/planilhas, audita alertas, corrige itens rejeitados e acompanha a Fila de Aprovação.
 - **Coordenador (`carlos.eduardo`):** Aprova descontos de **até 10%**.
 - **Gerente (`fernanda.lima`):** Aprova **Coordenação + Gerência** (descontos até 20% e verbas até R$ 5.000).
 - **Diretor (`roberto.almeida`):** Aprova **todas as alçadas**, incluindo descontos até 25%, verbas > R$ 5.000 e **Exceções Sazonais (até 30%)**.
@@ -321,9 +496,10 @@ def renderizar_tela_login():
 
         st.info(
             "👈 **Aviso para a Banca Avaliadora (Recursos na Barra Lateral Esquerda):**\n\n"
-            "Para manter esta tela inicial limpa conforme padrões corporativos de segurança, as informações de apoio encontram-se nas **duas abas recolhíveis na barra lateral esquerda**:\n"
-            "1. **🧭 Guia de Perfis e Alçadas (POL-COM-004):** Consulta às regras de visibilidade e limites de aprovação de cada cargo.\n"
-            "2. **🛠️ Área do Avaliador:** Consulta aos logins nominais de teste (`renata.alves`, `carlos.eduardo`, `fernanda.lima`, `roberto.almeida`), **acesso rápido em 1 clique** e botão de **Reset do Banco de Dados**."
+            "Para manter esta tela inicial limpa conforme padrões corporativos de segurança, as informações de apoio encontram-se nas **abas recolhíveis na barra lateral esquerda** (clique no botão azul **Menu / Avaliador** no canto superior esquerdo):\n"
+            "1. **🔔 Notificações Recentes:** Acompanhamento em tempo real de aprovações, rejeições e pendências de alçada.\n"
+            "2. **🧭 Guia de Perfis e Alçadas (POL-COM-004):** Consulta às regras de visibilidade e limites de aprovação de cada cargo.\n"
+            "3. **🛠️ Área do Avaliador:** Consulta aos logins nominais de teste (`renata.alves`, `carlos.eduardo`, `fernanda.lima`, `roberto.almeida`), **acesso rápido em 1 clique** e botão de **Reset do Banco de Dados**."
         )
 
 
@@ -372,8 +548,8 @@ def processar_ingestao_texto(texto_contexto_completo: str):
 def renderizar_visao_analista(usuario: dict):
     """
     Renderiza a interface do Analista:
-    - Aba 1: Ingestão, Auditoria dos 7 Edge Cases, Edição e Envio para Fila (com limpeza automática de estado).
-    - Aba 2: Fila de Aprovação completa em modo visualização (Épico 3.1).
+    - Aba 1: Ingestão, Auditoria dos 7 Edge Cases, Correção de Rejeições, Edição e Envio para Fila.
+    - Aba 2: Fila de Aprovação completa em modo visualização (com botão '📝 Corrigir Condição' em itens rejeitados).
     """
     st.title("📥 Painel do Analista Comercial — Ingestão e Governança")
     st.markdown(
@@ -381,19 +557,50 @@ def renderizar_visao_analista(usuario: dict):
         "ou acompanhe em tempo real o andamento das condições na aba **Fila de Aprovação**."
     )
 
-    # Exibir mensagem flash caso um item tenha acabado de ser enviado e o formulário tenha sido limpo (Épico 4)
+    # Exibir mensagem flash caso um item tenha acabado de ser enviado e o formulário tenha sido limpo
     msg_flash = st.session_state.pop("flash_sucesso_fila", None)
     if msg_flash:
         st.success(msg_flash)
 
-    aba_ingestao, aba_fila = st.tabs([
+    opcoes_abas_analista = [
         "1️⃣ Ingestão e Auditoria de Condições",
         "🏛️ Fila de Aprovação (Acompanhamento em Tempo Real)",
-    ])
+    ]
+    aba_redir = st.session_state.pop("redirecionar_aba_analista", None)
+    if aba_redir in opcoes_abas_analista:
+        st.session_state["aba_ativa_analista"] = aba_redir
+    elif st.session_state.get("aba_ativa_analista") not in opcoes_abas_analista:
+        st.session_state["aba_ativa_analista"] = opcoes_abas_analista[0]
+
+    aba_selecionada = st.radio(
+        "Navegação do Painel do Analista:",
+        opcoes_abas_analista,
+        horizontal=True,
+        key="aba_ativa_analista",
+        label_visibility="collapsed",
+    )
+    st.divider()
 
     reset_cnt = st.session_state.get("form_reset_counter", 0)
+    info_correcao = st.session_state.get("correcao_rejeicao_ativa")
 
-    with aba_ingestao:
+    if aba_selecionada == "1️⃣ Ingestão e Auditoria de Condições":
+        # ÉPICO 3 (CRÍTICO): Alerta persistente no topo do formulário enquanto corrige item rejeitado
+        if info_correcao:
+            col_alerta_corr, col_btn_canc_corr = st.columns([4, 1])
+            with col_alerta_corr:
+                st.error(
+                    f"🚨 **MODO DE CORREÇÃO DE CONDIÇÃO REPROVADA — Protocolo #{info_correcao['id']} "
+                    f"({info_correcao['cod_fornecedor']} - {info_correcao['razao_social']})**\n\n"
+                    f"**Motivo da Rejeição informado por {info_correcao['aprovado_por']}:** "
+                    f"*\"{info_correcao['motivo_rejeicao']}\"*\n\n"
+                    f"💡 **Instrução:** Ajuste os campos do formulário na **Seção 2** abaixo para sanar o apontamento do aprovador e clique em **Reenviar Condição Corrigida**."
+                )
+            with col_btn_canc_corr:
+                if st.button("✖️ Cancelar Correção", key="btn_cancelar_correcao_topo", width="stretch"):
+                    clear_form_state()
+                    st.rerun()
+
         with st.container(border=True):
             st.subheader("1. Inserir Dados da Negociação")
             col1, col2 = st.columns(2)
@@ -451,6 +658,12 @@ def renderizar_visao_analista(usuario: dict):
             st.divider()
             st.subheader("2. Auditoria de Compliance, Validação ERP e Revisão Humana")
 
+            if info_correcao:
+                st.warning(
+                    f"📝 **Atenção na Revisão (Protocolo #{info_correcao['id']}):** Corrija os parâmetros conforme o motivo da reprovação: "
+                    f"**\"{info_correcao['motivo_rejeicao']}\"**"
+                )
+
             # EDGE CASE 1: Alerta Visual de Prompt Injection
             alerta_inj = st.session_state.get("alerta_injection")
             if alerta_inj:
@@ -478,8 +691,7 @@ def renderizar_visao_analista(usuario: dict):
 
                 for i, cond in enumerate(condicoes):
                     renderizar_card_condicao_analista(i, cond, usuario, len(condicoes))
-
-    with aba_fila:
+    else:
         renderizar_conteudo_fila_aprovacao(usuario, modo_analista=True)
 
 
@@ -642,8 +854,11 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
             for ev in val_vigencia["erros"]:
                 erros_bloqueantes.append(f"📅 **VIOLAÇÃO DE VIGÊNCIA (Regra 6 / Edge Case 7):** {ev}")
 
-        # Validação 4: Sobreposição Contratual no Extrato ERP + Duplicidade no SQLite (Épico 1 e Épico 2 V5)
+        # Validação 4: Sobreposição Contratual no Extrato ERP + Duplicidade no SQLite (Épico 1 e Épico 2 V5/V6)
+        info_corr_atual = st.session_state.get("correcao_rejeicao_ativa")
+        id_ignorar_db = info_corr_atual["id"] if info_corr_atual else None
         cod_forn_valido = info_forn["cod_fornecedor"] if info_forn["encontrado"] else edit_forn
+
         sobreposicao = erp_integration.verificar_sobreposicao_extrato(
             cod_fornecedor=cod_forn_valido,
             cod_categoria=edit_cat,
@@ -652,31 +867,36 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
             data_fim_str=edit_dt_fim,
             tipo_condicao=edit_tipo,
             valor_proposto=edit_valor,
+            ignorar_id_sqlite=id_ignorar_db,
         )
 
-        justificativa_substituicao = ""
-        cod_condicao_subst_final = None
+        justificativa_substituicao = str(cond.get("justificativa_analista") or "")
+        cod_condicao_subst_final = cond.get("cod_condicao_substituida")
 
         if sobreposicao["tem_conflito"]:
             if sobreposicao.get("status") == "DIVERGENCIA":
                 st.warning(f"⚠️ **SOBREPOSIÇÃO COM DIVERGÊNCIA DE VALORES:** {sobreposicao['mensagem']}")
                 solicitar_subst = st.checkbox(
                     "⚠️ Solicitar substituição/correção da condição vigente",
+                    value=bool(cond.get("solicitar_subst_default", False)),
                     key=f"subst_chk_{gen}_{i}",
                 )
                 if solicitar_subst:
                     justificativa_substituicao = st.text_area(
                         "Justificativa da Substituição (Obrigatório para o Aprovador):",
+                        value=str(cond.get("justificativa_analista") or ""),
                         key=f"subst_just_{gen}_{i}",
                         placeholder="Descreva o motivo da renegociação ou correção da condição vigente para análise do gestor...",
                     )
                     if not justificativa_substituicao.strip():
                         erros_bloqueantes.append(
-                            "✏️ **Justificativa Obrigatória:** Preencha a justificativa da substituição acima para habilitar o envio à Fila de Aprovação."
+                            "✏️ **Justificativa Obrigatória:** Preencha a justificativa da substituição acima (e pressione Ctrl+Enter ou clique fora do campo) para habilitar o envio à Fila de Aprovação."
                         )
                     else:
-                        cod_condicao_subst_final = sobreposicao.get("cod_condicao_substituida_sugerida")
+                        cod_condicao_subst_final = sobreposicao.get("cod_condicao_substituida_sugerida") or cod_condicao_subst_final
                 else:
+                    justificativa_substituicao = ""
+                    cod_condicao_subst_final = None
                     erros_bloqueantes.append(
                         f"🚫 **Ação Bloqueada por Sobreposição:** {sobreposicao['mensagem']} "
                         "(Marque a opção '⚠️ Solicitar substituição/correção da condição vigente' acima caso deseje submeter uma renegociação/correção justificada)."
@@ -762,8 +982,13 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
             )
 
         # Botão de Envio para a Fila de Aprovação (SQLite)
+        label_btn_envio = (
+            f"📤 Reenviar Condição Corrigida (Protocolo #{info_corr_atual['id']}) para {aval_pol['alcada_exibicao']}"
+            if info_corr_atual
+            else f"📤 Enviar Condição #{i+1} para Fila de Aprovação ({aval_pol['alcada_exibicao']})"
+        )
         btn_enviar = st.button(
-            f"📤 Enviar Condição #{i+1} para Fila de Aprovação ({aval_pol['alcada_exibicao']})",
+            label_btn_envio,
             key=f"btn_fila_{i}",
             type="primary",
             disabled=(len(erros_bloqueantes) > 0),
@@ -778,6 +1003,7 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
                 data_fim_str=edit_dt_fim,
                 tipo_condicao=edit_tipo,
                 valor_proposto=edit_valor,
+                ignorar_id_sqlite=id_ignorar_db,
             )
             ok_schema, erros_schema = erp_integration.validar_schema_payload(payload_preview)
             bloqueio_envio = (
@@ -793,7 +1019,7 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
                 for es in erros_schema:
                     st.error(f"Erro de Schema ERP: {es}")
             else:
-                novo_id = database.inserir_condicao_fila({
+                dados_gravacao = {
                     "cod_fornecedor": cod_forn_valido,
                     "razao_social": info_forn.get("razao_social", ""),
                     "cod_categoria": edit_cat,
@@ -813,12 +1039,20 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
                     "payload": payload_preview,
                     "origem_referencia": origem_ref,
                     "criado_por": usuario.get("nome", "Renata Alves"),
-                })
+                }
 
-                msg_sucesso = (
-                    f"🎉 Condição enviada com sucesso para a **Fila de Aprovação** sob o protocolo **#{novo_id}** "
-                    f"(Alçada: **{aval_pol['alcada_exibicao']}**)! O cache e o formulário foram limpos."
-                )
+                if info_corr_atual:
+                    novo_id = database.atualizar_condicao_rejeitada_fila(info_corr_atual["id"], dados_gravacao)
+                    msg_sucesso = (
+                        f"🎉 Condição corrigida e reenviada com sucesso sob o protocolo **#{novo_id}** "
+                        f"(Alçada: **{aval_pol['alcada_exibicao']}**)! O item voltou para status Pendente de Aprovação."
+                    )
+                else:
+                    novo_id = database.inserir_condicao_fila(dados_gravacao)
+                    msg_sucesso = (
+                        f"🎉 Condição enviada com sucesso para a **Fila de Aprovação** sob o protocolo **#{novo_id}** "
+                        f"(Alçada: **{aval_pol['alcada_exibicao']}**)! O cache e o formulário foram limpos."
+                    )
 
                 # Verificar se há condição irmã restante (caso de condições mistas no mesmo e-mail)
                 restantes = [c for idx, c in enumerate(st.session_state.get("condicoes_extraidas", [])) if idx != i]
@@ -835,6 +1069,7 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
                     st.session_state["processado"] = True
 
                 st.session_state["flash_sucesso_fila"] = msg_sucesso
+                st.session_state["toast_pendente"] = (f"📤 Protocolo #{novo_id} enviado para aprovação!", "✅")
                 st.rerun()
 
 
@@ -846,59 +1081,95 @@ def renderizar_visao_aprovador(usuario: dict):
 
 def renderizar_conteudo_fila_aprovacao(usuario: dict, modo_analista: bool = False):
     """
-    Épico 3.1: Componente unificado da Fila de Aprovação.
-    - Analista (`renata.alves`): visualiza todas as demandas da fila para acompanhamento, sem botões de decisão.
-    - Gestores (`carlos.eduardo`, `fernanda.lima`, `roberto.almeida`): visualizam as demandas e possuem botões de
-      Aprovar/Reprovar habilitados estritamente dentro de suas respectivas alçadas.
+    Épico 1 (Missão V6) + Épico 3.1: Componente unificado da Fila de Aprovação.
+    - Analista (`renata.alves`): visualiza todas as demandas da fila para acompanhamento e possui o botão
+      '📝 Corrigir Condição' nos itens com status REJEITADO.
+    - Gestores (`carlos.eduardo`, `fernanda.lima`, `roberto.almeida`):
+      * 'Apenas minha alçada de aprovação': ESTRITO (`nivel_hierarquia == nivel_usuario` — ex: Diretor vê apenas 'Diretoria Comercial').
+      * 'Visão Geral (Minha Hierarquia)': Acumulado (`nivel_hierarquia <= nivel_usuario`).
+      * 'Todos': Todas as demandas da fila.
     """
     role = usuario["role"].lower()
     desc_escopo = {
-        "analista": "Modo de **Acompanhamento (Somente Leitura)**: Você visualiza o status de todas as condições enviadas para aprovação.",
-        "coordenador": "Você aprova condições de **Coordenação Comercial** (Descontos até 10%).",
-        "gerente": "Você aprova condições de **Coordenação Comercial** e **Gerência Comercial** (Descontos até 20% e Verbas até R$ 5.000,00).",
-        "diretor": "Você possui alçada máxima (**Diretoria Comercial**): aprova **todas as condições** (Coordenação, Gerência, Diretoria e Exceções Sazonais até 30%).",
+        "analista": "Modo de **Acompanhamento e Correção**: Você visualiza o status de todas as condições e pode corrigir condições reprovadas.",
+        "coordenador": "Sua alçada direta é **Coordenação Comercial** (Descontos até 10%).",
+        "gerente": "Sua alçada direta é **Gerência Comercial** (Descontos > 10% até 20% e Verbas até R$ 5.000,00) e sua hierarquia inclui Coordenação.",
+        "diretor": "Sua alçada direta é **Diretoria Comercial** (Descontos > 20% até 25%, Verbas > R$ 5.000 e Exceções Sazonais até 30%) e sua hierarquia abrange todas as alçadas.",
     }
 
     st.info(f"🔐 **Perfil Ativo ({usuario['nome']} — `{usuario['username']}`):** {desc_escopo.get(role, '')}")
 
-    if modo_analista:
-        incluir_todas = True
-    else:
-        col_f1, col_f2 = st.columns([2, 2])
-        with col_f1:
-            escopo_visao = st.radio(
-                "Escopo de Visualização:",
-                ["Apenas Minha Alçada de Aprovação", "Todas as Demandas da Fila"],
-                horizontal=True,
-                key=f"escopo_fila_{role}",
-            )
-            incluir_todas = (escopo_visao == "Todas as Demandas da Fila")
+    opcoes_escopo_gestor = [
+        "Apenas minha alçada de aprovação",
+        "Visão Geral (Minha Hierarquia)",
+        "Todos",
+    ]
+    mapa_modo_escopo = {
+        "Apenas minha alçada de aprovação": "ESTRITO",
+        "Visão Geral (Minha Hierarquia)": "HIERARQUIA",
+        "Todos": "TODOS",
+    }
 
-    todos_visiveis = database.listar_fila_por_perfil(role, incluir_todas_alcadas=incluir_todas)
+    if modo_analista:
+        modo_escopo = "TODOS"
+    else:
+        chave_escopo = f"escopo_fila_{role}"
+        escopo_redir = st.session_state.pop("redirecionar_escopo_fila", None)
+        if escopo_redir in opcoes_escopo_gestor:
+            st.session_state[chave_escopo] = escopo_redir
+        elif st.session_state.get(chave_escopo) not in opcoes_escopo_gestor:
+            st.session_state[chave_escopo] = opcoes_escopo_gestor[0]
+
+        escopo_visao = st.radio(
+            "Escopo de Visualização:",
+            opcoes_escopo_gestor,
+            horizontal=True,
+            key=chave_escopo,
+            help=(
+                "'Apenas minha alçada de aprovação' exibe estritamente os itens cujo nível exigido é igual ao seu cargo. "
+                "Use 'Visão Geral (Minha Hierarquia)' ou 'Todos' para visualizar níveis inferiores ou toda a fila."
+            ),
+        )
+        modo_escopo = mapa_modo_escopo.get(escopo_visao, "ESTRITO")
+
+    todos_visiveis = database.listar_fila_por_perfil(
+        role,
+        incluir_todas_alcadas=(modo_escopo == "TODOS"),
+        modo_escopo=modo_escopo,
+    )
     pendentes = [x for x in todos_visiveis if x["status_fila"] == "PENDENTE"]
     aprovados = [x for x in todos_visiveis if x["status_fila"] == "APROVADO"]
     rejeitados = [x for x in todos_visiveis if x["status_fila"] == "REJEITADO"]
     acima_alcada = database.contar_itens_acima_alcada(role) if not modo_analista else 0
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("⏳ Pendentes Listadas", len(pendentes))
-    m2.metric("✅ Aprovadas", len(aprovados))
-    m3.metric("❌ Reprovadas", len(rejeitados))
+    m1.metric("⏳ Pendentes no Filtro", len(pendentes))
+    m2.metric("✅ Aprovadas no Filtro", len(aprovados))
+    m3.metric("❌ Reprovadas no Filtro", len(rejeitados))
     m4.metric("🔒 Pendentes em Alçada Superior", acima_alcada)
 
-    if acima_alcada > 0 and not incluir_todas:
+    if acima_alcada > 0 and modo_escopo != "TODOS":
         st.caption(
             f"ℹ️ *Existem **{acima_alcada}** condição(ões) pendente(s) em alçada superior à sua. "
-            "Você pode alternar o filtro acima para 'Todas as Demandas da Fila' caso deseje consultá-las em modo leitura.*"
+            "Você pode alternar o filtro acima para 'Todos' caso deseje consultá-las em modo leitura.*"
         )
 
     st.divider()
+
+    opcoes_status = ["PENDENTE", "APROVADO", "REJEITADO", "TODOS"]
+    chave_filtro_st = f"filtro_status_{role}_{'ana' if modo_analista else 'ges'}"
+    status_redir = st.session_state.pop("redirecionar_filtro_status", None)
+    if status_redir in opcoes_status:
+        st.session_state[chave_filtro_st] = status_redir
+    elif st.session_state.get(chave_filtro_st) not in opcoes_status:
+        st.session_state[chave_filtro_st] = "PENDENTE"
+
     filtro = st.radio(
         "Filtrar por Status:",
-        ["PENDENTE", "APROVADO", "REJEITADO", "TODOS"],
+        opcoes_status,
         format_func=lambda x: "Todos os Status" if x == "TODOS" else formatar_termo_humano(x),
         horizontal=True,
-        key=f"filtro_status_{role}_{'ana' if modo_analista else 'ges'}",
+        key=chave_filtro_st,
     )
 
     lista_exibicao = (
@@ -906,22 +1177,51 @@ def renderizar_conteudo_fila_aprovacao(usuario: dict, modo_analista: bool = Fals
         else [x for x in todos_visiveis if x["status_fila"] == filtro]
     )
 
+    # Se o usuário clicou em uma notificação de um protocolo específico, colocá-lo no topo e destacá-lo
+    id_destaque = st.session_state.pop("protocolo_destacado_id", None)
+    if id_destaque is not None:
+        lista_exibicao = sorted(lista_exibicao, key=lambda x: (0 if x["id"] == id_destaque else 1, -x["id"]))
+
     if not lista_exibicao:
-        st.warning(f"Nenhuma condição encontrada para o filtro selecionado (**{formatar_termo_humano(filtro)}**).")
+        msg_vazio = f"Nenhuma condição encontrada para o filtro selecionado (**{formatar_termo_humano(filtro)}**)"
+        if not modo_analista and modo_escopo == "ESTRITO":
+            msg_vazio += (
+                f" na alçada estrita de **{usuario['cargo_exibicao']}**. "
+                "💡 *Dica: Selecione **'Visão Geral (Minha Hierarquia)'** ou **'Todos'** acima para ver itens de alçadas inferiores.*"
+            )
+        else:
+            msg_vazio += "."
+        st.warning(msg_vazio)
         return
 
     for item in lista_exibicao:
-        renderizar_card_item_fila(item, usuario, modo_analista=modo_analista)
+        renderizar_card_item_fila(
+            item,
+            usuario,
+            modo_analista=modo_analista,
+            destacado=(id_destaque == item["id"]),
+        )
 
 
-def renderizar_card_item_fila(item: dict, usuario: dict, modo_analista: bool = False):
-    """Renderiza cada card da fila de aprovação com textos limpos (Épico 2.1) e controle de alçada (Épico 3.1)."""
+def renderizar_card_item_fila(
+    item: dict,
+    usuario: dict,
+    modo_analista: bool = False,
+    destacado: bool = False,
+):
+    """
+    Renderiza cada card da fila de aprovação com:
+    - Épico 2 (Missão V6): Exibição obrigatória da `justificativa_analista` + Contexto comparativo do ERP (`extrato_erp.csv`).
+    - Épico 3 (Missão V6): Ciclo de vida da rejeição (campo obrigatório de `motivo_rejeicao` para o Aprovador e
+      botão '📝 Corrigir Condição' para o Analista nos itens REJEITADOS).
+    """
     item_id = item["id"]
     status = item["status_fila"]
     icone_st = {"PENDENTE": "⏳", "APROVADO": "✅", "REJEITADO": "❌"}.get(status, "📋")
     tipo_limpo = formatar_termo_humano(item["tipo"])
     cat_limpa = formatar_termo_humano(item["cod_categoria"])
     status_limpo = formatar_termo_humano(status)
+    sufixo_key = "ana" if modo_analista else "ges"
 
     val_fmt = (
         f"{item['valor']:.2f}% ({tipo_limpo})"
@@ -949,6 +1249,9 @@ def renderizar_card_item_fila(item: dict, usuario: dict, modo_analista: bool = F
         }
 
     with st.container(border=True):
+        if destacado:
+            st.info(f"🔔 **Item selecionado a partir da Central de Notificações (Protocolo #{item_id})**")
+
         c_top1, c_top2 = st.columns([2.6, 1.4])
         with c_top1:
             st.subheader(f"{icone_st} Protocolo #{item_id} — {item['cod_fornecedor']} ({item['razao_social']})")
@@ -964,11 +1267,14 @@ def renderizar_card_item_fila(item: dict, usuario: dict, modo_analista: bool = F
         if item.get("contrapartida"):
             st.markdown(f"**Contrapartida Acordada:** {item['contrapartida']}")
 
-        just_analista = str(item.get("justificativa_analista") or "").strip()
-        if just_analista:
-            cod_subst_txt = f" (Substituindo `{item['cod_condicao_substituida']}`)" if item.get("cod_condicao_substituida") else ""
+        # ÉPICO 2 (Missão V6): Exibição obrigatória da Justificativa do Analista + Contexto Comparativo do ERP
+        ctx_subst = erp_integration.obter_contexto_substituicao_erp(item)
+        if ctx_subst.get("eh_substituicao"):
             st.warning(
-                f"🔄 **SUBSTITUIÇÃO SOLICITADA{cod_subst_txt} | Justificativa do Analista:** {just_analista}"
+                f"🔄 **SOLICITAÇÃO DE SUBSTITUIÇÃO / OVERRIDE AUDITADO**\n\n"
+                f"📊 **Contexto ERP ({ctx_subst['comparativo_curto']}):** {ctx_subst['detalhe_erp']}\n\n"
+                f"💬 **Justificativa do Analista ({item.get('criado_por', 'Analista')}):** "
+                f"*\"{ctx_subst['justificativa_analista']}\"*"
             )
 
         if item["status_politica"] == "EXCECAO_SAZONAL":
@@ -979,9 +1285,31 @@ def renderizar_card_item_fila(item: dict, usuario: dict, modo_analista: bool = F
                 f"👤 **Enviado por:** {item.get('criado_por')} em `{item.get('criado_em')}`"
             )
 
-        if status != "PENDENTE":
-            st.info(
-                f"**Decisão Registrada:** {status_limpo} por **{item.get('aprovado_por')}** "
+        # ÉPICO 3 (Missão V6): Exibição clara de itens REJEITADOS (com `motivo_rejeicao` e botão de Correção)
+        if status == "REJEITADO":
+            motivo_rej_card = (
+                str(item.get("motivo_rejeicao") or "").strip()
+                or str(item.get("observacao_decisao") or "").strip()
+                or "Motivo não especificado."
+            )
+            st.error(
+                f"❌ **CONDIÇÃO REPROVADA POR {item.get('aprovado_por', 'GESTOR')}** "
+                f"(Matrícula `{item.get('aprovador_matricula', '')}` em `{item.get('aprovado_em', '')}`)\n\n"
+                f"📌 **Motivo da Rejeição:** *\"{motivo_rej_card}\"*"
+            )
+            if modo_analista or usuario.get("role", "").lower() == "analista":
+                if st.button(
+                    f"📝 Corrigir Condição #{item_id}",
+                    key=f"btn_corrigir_{sufixo_key}_{item_id}",
+                    type="primary",
+                    width="stretch",
+                ):
+                    iniciar_correcao_condicao_rejeitada(item)
+                    st.rerun()
+
+        elif status == "APROVADO":
+            st.success(
+                f"✅ **Decisão Registrada:** {status_limpo} por **{item.get('aprovado_por')}** "
                 f"(Matrícula `{item.get('aprovador_matricula')}`) em `{item.get('aprovado_em')}`"
                 + (f" — Observação: *{item.get('observacao_decisao')}*" if item.get("observacao_decisao") else "")
             )
@@ -989,7 +1317,6 @@ def renderizar_card_item_fila(item: dict, usuario: dict, modo_analista: bool = F
         # Visibilidade Técnica do JSON + Download
         json_formatado = json.dumps(payload_exibicao, indent=2, ensure_ascii=False)
         envelope_http = erp_integration.envelopar_requisicao_post(payload_exibicao)
-        sufixo_key = "ana" if modo_analista else "ges"
 
         with st.expander("Visualizar Payload JSON (Técnico)", expanded=False):
             st.caption("Payload final formatado para `POST /api/v1/condicoes` (`condicao_post.schema.json`):")
@@ -1011,21 +1338,66 @@ def renderizar_card_item_fila(item: dict, usuario: dict, modo_analista: bool = F
         if status == "PENDENTE":
             if pode_aprovar:
                 obs = st.text_input(
-                    "Observação da Aprovação / Justificativa (Opcional):",
+                    "Observação da Aprovação (Opcional para Aprovar):",
                     key=f"obs_dec_{sufixo_key}_{item_id}",
                     placeholder="Ex: De acordo com campanha comercial Q4...",
                 )
                 b_col1, b_col2, _ = st.columns([1.2, 1.2, 2])
+                chave_modo_rej = f"modo_rejeicao_{item_id}"
+
                 with b_col1:
                     if st.button("✅ Aprovar e Integrar ao ERP", key=f"aprov_{sufixo_key}_{item_id}", type="primary", width="stretch"):
-                        database.decidir_condicao_fila(item_id, "APROVADO", usuario, obs)
-                        st.success(f"Condição #{item_id} APROVADA com sucesso! Payload JSON integrado ao ERP.")
+                        database.decidir_condicao_fila(item_id, "APROVADO", usuario, observacao=obs)
+                        st.session_state.pop(chave_modo_rej, None)
+                        st.session_state["toast_pendente"] = (
+                            f"✅ Protocolo #{item_id} APROVADO e integrado ao ERP!",
+                            "✅",
+                        )
                         st.rerun()
                 with b_col2:
                     if st.button("❌ Reprovar Condição", key=f"rejeit_{sufixo_key}_{item_id}", width="stretch"):
-                        database.decidir_condicao_fila(item_id, "REJEITADO", usuario, obs)
-                        st.warning(f"Condição #{item_id} REPROVADA.")
+                        st.session_state[chave_modo_rej] = True
                         st.rerun()
+
+                # ÉPICO 3 (Missão V6): Ao clicar em "Reprovar", exibir campo obrigatório pedindo o "Motivo da Rejeição"
+                if st.session_state.get(chave_modo_rej, False):
+                    with st.container(border=True):
+                        st.markdown(f"#### ⚠️ Confirmar Reprovação do Protocolo #{item_id}")
+                        motivo_rej_input = st.text_area(
+                            "Motivo da Rejeição (Obrigatório — será exibido ao Analista para guiar a correção):",
+                            value=obs,
+                            key=f"motivo_rej_txt_{sufixo_key}_{item_id}",
+                            placeholder="Ex: Desconto acima da margem atual da loja; favor renegociar para 11% ou ajustar vigência...",
+                        )
+                        cr_col1, cr_col2, _ = st.columns([1.4, 1.0, 2])
+                        with cr_col1:
+                            if st.button(
+                                "🚨 Confirmar Reprovação",
+                                key=f"conf_rejeit_{sufixo_key}_{item_id}",
+                                type="primary",
+                                width="stretch",
+                            ):
+                                motivo_final = (motivo_rej_input or "").strip()
+                                if not motivo_final:
+                                    st.error("⚠️ O preenchimento do **Motivo da Rejeição** é obrigatório para reprovar a condição.")
+                                else:
+                                    database.decidir_condicao_fila(
+                                        item_id,
+                                        "REJEITADO",
+                                        usuario,
+                                        observacao=motivo_final,
+                                        motivo_rejeicao=motivo_final,
+                                    )
+                                    st.session_state.pop(chave_modo_rej, None)
+                                    st.session_state["toast_pendente"] = (
+                                        f"❌ Protocolo #{item_id} reprovado. O Analista foi notificado para correção!",
+                                        "❌",
+                                    )
+                                    st.rerun()
+                        with cr_col2:
+                            if st.button("Cancelar", key=f"canc_rejeit_{sufixo_key}_{item_id}", width="stretch"):
+                                st.session_state.pop(chave_modo_rej, None)
+                                st.rerun()
             else:
                 if modo_analista:
                     st.caption(f"👁️ *Modo Acompanhamento: Aguardando decisão da alçada **{item['alcada_exibicao']}**.*")
@@ -1037,6 +1409,13 @@ def renderizar_card_item_fila(item: dict, usuario: dict, modo_analista: bool = F
 
 
 # --- FLUXO PRINCIPAL DA APLICAÇÃO ---
+toast_info = st.session_state.pop("toast_pendente", None)
+if toast_info:
+    if isinstance(toast_info, tuple) and len(toast_info) == 2:
+        st.toast(toast_info[0], icon=toast_info[1])
+    else:
+        st.toast(str(toast_info))
+
 renderizar_sidebar()
 
 usuario_atual = st.session_state.get("usuario_logado")
