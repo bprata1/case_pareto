@@ -9,10 +9,40 @@ import erp_integration
 import database
 
 st.set_page_config(
-    page_title="Vitalis | Pareto AI Builder V3 - Condições Comerciais",
+    page_title="Vitalis | Pareto AI Builder V5 - Condições Comerciais",
     page_icon="💊",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
+)
+
+# Épico 3.2: Injeção de CSS para aumentar o contraste e visibilidade do botão nativo de expandir a Sidebar
+st.markdown(
+    """
+    <style>
+    [data-testid="collapsedControl"],
+    [data-testid="stSidebarCollapsedControl"] {
+        background-color: #1f6feb !important;
+        color: #ffffff !important;
+        border: 2px solid #0d419d !important;
+        border-radius: 8px !important;
+        box-shadow: 0 2px 8px rgba(31, 111, 235, 0.45) !important;
+        padding: 4px 8px !important;
+        margin: 6px !important;
+        transition: all 0.2s ease-in-out !important;
+    }
+    [data-testid="collapsedControl"]:hover,
+    [data-testid="stSidebarCollapsedControl"]:hover {
+        background-color: #1158c7 !important;
+        transform: scale(1.06) !important;
+    }
+    [data-testid="collapsedControl"] svg,
+    [data-testid="stSidebarCollapsedControl"] svg {
+        fill: #ffffff !important;
+        stroke: #ffffff !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 # Garantir inicialização do banco SQLite com usuários nominais da V3
@@ -587,7 +617,7 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
             for ev in val_vigencia["erros"]:
                 erros_bloqueantes.append(f"📅 **VIOLAÇÃO DE VIGÊNCIA (Regra 6 / Edge Case 7):** {ev}")
 
-        # Validação 4: Sobreposição Contratual no Extrato ERP + Duplicidade no SQLite (Edge Case 6 & Épico 3.2)
+        # Validação 4: Sobreposição Contratual no Extrato ERP + Duplicidade no SQLite (Épico 1 e Épico 2 V5)
         cod_forn_valido = info_forn["cod_fornecedor"] if info_forn["encontrado"] else edit_forn
         sobreposicao = erp_integration.verificar_sobreposicao_extrato(
             cod_fornecedor=cod_forn_valido,
@@ -598,10 +628,38 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
             tipo_condicao=edit_tipo,
             valor_proposto=edit_valor,
         )
+
+        justificativa_substituicao = ""
+        cod_condicao_subst_final = None
+
         if sobreposicao["tem_conflito"]:
-            erros_bloqueantes.append(
-                f"🚫 **SOBREPOSIÇÃO CONTRATUAL / DUPLICIDADE NO ERP (Regra 9):** {sobreposicao['mensagem']}"
-            )
+            if sobreposicao.get("status") == "DIVERGENCIA":
+                st.warning(f"⚠️ **SOBREPOSIÇÃO COM DIVERGÊNCIA DE VALORES:** {sobreposicao['mensagem']}")
+                solicitar_subst = st.checkbox(
+                    "⚠️ Solicitar substituição/correção da condição vigente",
+                    key=f"subst_chk_{gen}_{i}",
+                )
+                if solicitar_subst:
+                    justificativa_substituicao = st.text_area(
+                        "Justificativa da Substituição (Obrigatório para o Aprovador):",
+                        key=f"subst_just_{gen}_{i}",
+                        placeholder="Descreva o motivo da renegociação ou correção da condição vigente para análise do gestor...",
+                    )
+                    if not justificativa_substituicao.strip():
+                        erros_bloqueantes.append(
+                            "✏️ **Justificativa Obrigatória:** Preencha a justificativa da substituição acima para habilitar o envio à Fila de Aprovação."
+                        )
+                    else:
+                        cod_condicao_subst_final = sobreposicao.get("cod_condicao_substituida_sugerida")
+                else:
+                    erros_bloqueantes.append(
+                        f"🚫 **Ação Bloqueada por Sobreposição:** {sobreposicao['mensagem']} "
+                        "(Marque a opção '⚠️ Solicitar substituição/correção da condição vigente' acima caso deseje submeter uma renegociação/correção justificada)."
+                    )
+            else:
+                erros_bloqueantes.append(
+                    f"🚫 **DUPLICIDADE BLOQUEADA (Regra 9):** {sobreposicao['mensagem']}"
+                )
 
         # Validação 5: Política Comercial, Tetos e Exceção Sazonal (Regra 4, Regra 5, Nota * / Edge Case 4)
         aval_pol = erp_integration.avaliar_politica_deterministica(
@@ -655,6 +713,7 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
             aprovador_nome=f"Aguardando ({aval_pol['alcada_exibicao']})",
             aprovador_matricula="PENDENTE",
             contrapartida=edit_contra,
+            cod_condicao_substituida=cod_condicao_subst_final,
             origem_referencia=origem_ref,
         )
         envelope_post = erp_integration.envelopar_requisicao_post(payload_preview)
@@ -685,7 +744,7 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
             disabled=(len(erros_bloqueantes) > 0),
         )
         if btn_enviar:
-            # Dupla checagem contra duplicidade no momento exato do clique
+            # Dupla checagem contra duplicidade exata no momento do clique
             recheck_sob = erp_integration.verificar_sobreposicao_extrato(
                 cod_fornecedor=cod_forn_valido,
                 cod_categoria=edit_cat,
@@ -696,7 +755,14 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
                 valor_proposto=edit_valor,
             )
             ok_schema, erros_schema = erp_integration.validar_schema_payload(payload_preview)
-            if recheck_sob["tem_conflito"]:
+            bloqueio_envio = (
+                recheck_sob["tem_conflito"]
+                and (
+                    recheck_sob.get("status") == "DUPLICIDADE"
+                    or not justificativa_substituicao.strip()
+                )
+            )
+            if bloqueio_envio:
                 st.error(f"🚫 {recheck_sob['mensagem']}")
             elif not ok_schema:
                 for es in erros_schema:
@@ -712,7 +778,8 @@ def renderizar_card_condicao_analista(i: int, cond: dict, usuario: dict, total_c
                     "data_inicio": edit_dt_ini.strip()[:10],
                     "data_fim": edit_dt_fim.strip()[:10],
                     "contrapartida": edit_contra,
-                    "cod_condicao_substituida": None,
+                    "cod_condicao_substituida": cod_condicao_subst_final,
+                    "justificativa_analista": justificativa_substituicao.strip(),
                     "alcada_minima": aval_pol["alcada_minima"],
                     "alcada_exibicao": aval_pol["alcada_exibicao"],
                     "status_politica": aval_pol["status_politica"],
@@ -871,6 +938,13 @@ def renderizar_card_item_fila(item: dict, usuario: dict, modo_analista: bool = F
 
         if item.get("contrapartida"):
             st.markdown(f"**Contrapartida Acordada:** {item['contrapartida']}")
+
+        just_analista = str(item.get("justificativa_analista") or "").strip()
+        if just_analista:
+            cod_subst_txt = f" (Substituindo `{item['cod_condicao_substituida']}`)" if item.get("cod_condicao_substituida") else ""
+            st.warning(
+                f"🔄 **SUBSTITUIÇÃO SOLICITADA{cod_subst_txt} | Justificativa do Analista:** {just_analista}"
+            )
 
         if item["status_politica"] == "EXCECAO_SAZONAL":
             st.warning(f"🎄 **{formatar_termo_humano('EXCECAO_SAZONAL')}:** {item.get('parecer_ia', '')}")

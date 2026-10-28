@@ -69,6 +69,7 @@ def init_db():
                 data_fim TEXT NOT NULL,
                 contrapartida TEXT,
                 cod_condicao_substituida TEXT,
+                justificativa_analista TEXT DEFAULT '',
                 alcada_minima TEXT NOT NULL,
                 alcada_exibicao TEXT NOT NULL,
                 nivel_hierarquia INTEGER NOT NULL,
@@ -86,6 +87,12 @@ def init_db():
                 observacao_decisao TEXT
             )
         """)
+
+        # Garantir coluna justificativa_analista caso a tabela já existisse de versão anterior
+        cursor.execute("PRAGMA table_info(fila_aprovacao)")
+        colunas_existentes = [col["name"] for col in cursor.fetchall()]
+        if "justificativa_analista" not in colunas_existentes:
+            cursor.execute("ALTER TABLE fila_aprovacao ADD COLUMN justificativa_analista TEXT DEFAULT ''")
 
         # Remover logins genéricos legados da V2 caso existam, mantendo apenas os logins nominais da V3
         cursor.execute("DELETE FROM usuarios WHERE username IN ('analista', 'coordenador', 'gerente', 'diretor')")
@@ -197,10 +204,10 @@ def inserir_condicao_fila(dados: dict) -> int:
         INSERT INTO fila_aprovacao (
             cod_fornecedor, razao_social, cod_categoria, tipo, valor,
             lojas_json, data_inicio, data_fim, contrapartida, cod_condicao_substituida,
-            alcada_minima, alcada_exibicao, nivel_hierarquia, status_politica,
-            parecer_ia, alertas_json, payload_json, origem_referencia,
+            justificativa_analista, alcada_minima, alcada_exibicao, nivel_hierarquia,
+            status_politica, parecer_ia, alertas_json, payload_json, origem_referencia,
             status_fila, criado_por, criado_em
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', ?, ?)
     """, (
         dados.get("cod_fornecedor", ""),
         dados.get("razao_social", ""),
@@ -212,6 +219,7 @@ def inserir_condicao_fila(dados: dict) -> int:
         dados.get("data_fim", ""),
         dados.get("contrapartida"),
         dados.get("cod_condicao_substituida"),
+        dados.get("justificativa_analista", ""),
         alcada_min,
         dados.get("alcada_exibicao", ""),
         nivel,

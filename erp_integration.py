@@ -577,13 +577,13 @@ def verificar_sobreposicao_extrato(
     """
     conflitos = []
     if not cod_fornecedor or not cod_categoria or not lojas or not data_inicio_str or not data_fim_str:
-        return {"tem_conflito": False, "duplicidade_sqlite": False, "conflitos": [], "mensagem": ""}
+        return {"tem_conflito": False, "status": "OK", "duplicidade_sqlite": False, "conflitos": [], "cod_condicao_substituida_sugerida": None, "mensagem": ""}
 
     try:
         dt_ini_nova = datetime.strptime(str(data_inicio_str).strip()[:10], "%Y-%m-%d").date()
         dt_fim_nova = datetime.strptime(str(data_fim_str).strip()[:10], "%Y-%m-%d").date()
     except Exception:
-        return {"tem_conflito": False, "duplicidade_sqlite": False, "conflitos": [], "mensagem": ""}
+        return {"tem_conflito": False, "status": "OK", "duplicidade_sqlite": False, "conflitos": [], "cod_condicao_substituida_sugerida": None, "mensagem": ""}
 
     cod_forn_upper = str(cod_fornecedor).strip().upper()
     cod_cat_upper = normalizar_categoria(cod_categoria)
@@ -710,7 +710,13 @@ def verificar_sobreposicao_extrato(
         dt_ini_nova_br = dt_ini_nova.strftime("%d/%m/%Y")
         dt_fim_nova_br = dt_fim_nova.strftime("%d/%m/%Y")
 
+        tem_duplicidade_exata = False
+        cod_subst_sugerido = None
+
         for c in conflitos:
+            if c["cod_condicao"].startswith("COND-") and not cod_subst_sugerido:
+                cod_subst_sugerido = c["cod_condicao"]
+
             txt_val_exist, num_val_exist = _formatar_valor_condicao_texto(c["tipo"], c["valor_atual"])
             lojas_str = ", ".join(c["lojas_conflitantes"])
 
@@ -720,30 +726,52 @@ def verificar_sobreposicao_extrato(
                 txt_val_prop, num_val_prop = ("nova condição comercial", None)
 
             mesmo_valor = (num_val_prop is not None and abs(num_val_exist - num_val_prop) < 0.001)
-            mesmo_periodo = (c["data_inicio"] == dt_ini_nova_iso and c["data_fim"] == dt_fim_nova_iso)
 
-            if mesmo_valor and mesmo_periodo:
-                mensagens_detalhadas.append(
-                    f"Atenção: Uma condição exatamente igual ({txt_val_exist} até {c['data_fim']} / {c['data_fim_br']} — "
-                    f"registro {c['cod_condicao']}, lojas: {lojas_str}) já está vigente no ERP. "
-                    f"Ação bloqueada por duplicidade."
-                )
+            if mesmo_valor:
+                tem_duplicidade_exata = True
+                if c["origem_conflito"] == "SQLITE_ERP" and c["status_registro"] == "PENDENTE":
+                    mensagens_detalhadas.append(
+                        f"Atenção: Uma proposta idêntica já se encontra na Fila de Aprovação "
+                        f"(Status: {c['status_registro']} — {c['cod_condicao']}, {txt_val_exist} até {c['data_fim_br']} / {c['data_fim']}, lojas: {lojas_str})."
+                    )
+                else:
+                    mensagens_detalhadas.append(
+                        f"Atenção: Esta condição já está VIGENTE no ERP "
+                        f"({txt_val_exist} até {c['data_fim_br']} / {c['data_fim']} — registro {c['cod_condicao']}, lojas: {lojas_str})."
+                    )
             else:
-                mensagens_detalhadas.append(
-                    f"Atenção: A condição {c['cod_condicao']} já está vigente para este fornecedor e lojas ({lojas_str}) "
-                    f"até {c['data_fim_br']} ({c['data_fim']}) com {txt_val_exist}. "
-                    f"A nova proposta tenta aplicar {txt_val_prop} no mesmo período ({dt_ini_nova_br} a {dt_fim_nova_br}). "
-                    f"Ação bloqueada por sobreposição."
-                )
+                if c["origem_conflito"] == "SQLITE_ERP" and c["status_registro"] == "PENDENTE":
+                    mensagens_detalhadas.append(
+                        f"Atenção: Já existe uma proposta na Fila de Aprovação ({c['cod_condicao']}, Status: PENDENTE) "
+                        f"para este fornecedor e lojas ({lojas_str}) até {c['data_fim_br']} ({c['data_fim']}) com {txt_val_exist}. "
+                        f"A nova proposta tenta aplicar {txt_val_prop} no mesmo período ({dt_ini_nova_br} a {dt_fim_nova_br})."
+                    )
+                else:
+                    mensagens_detalhadas.append(
+                        f"Atenção: A condição {c['cod_condicao']} já está vigente para este fornecedor e lojas ({lojas_str}) "
+                        f"até {c['data_fim_br']} ({c['data_fim']}) com {txt_val_exist}. "
+                        f"A nova proposta tenta aplicar {txt_val_prop} no mesmo período ({dt_ini_nova_br} a {dt_fim_nova_br})."
+                    )
+
+        status_conflito = "DUPLICIDADE" if tem_duplicidade_exata else "DIVERGENCIA"
 
         return {
             "tem_conflito": True,
+            "status": status_conflito,
             "duplicidade_sqlite": duplicidade_sqlite,
             "conflitos": conflitos,
+            "cod_condicao_substituida_sugerida": cod_subst_sugerido,
             "mensagem": " | ".join(mensagens_detalhadas),
         }
 
-    return {"tem_conflito": False, "duplicidade_sqlite": False, "conflitos": [], "mensagem": ""}
+    return {
+        "tem_conflito": False,
+        "status": "OK",
+        "duplicidade_sqlite": False,
+        "conflitos": [],
+        "cod_condicao_substituida_sugerida": None,
+        "mensagem": "",
+    }
 
 
 validar_sobreposicao = verificar_sobreposicao_extrato
