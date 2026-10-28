@@ -59,3 +59,8 @@ Elevar o MVP do **Pareto AI Builder** para uma arquitetura corporativa resilient
   - [x] Testar unitariamente e ponta a ponta os 4 e-mails + anexo e os 7 edge cases.
   - [x] Rodar e testar a interface do Streamlit localmente, verificando logs e comportamento.
   - [x] Atualizar `PLANEJAMENTO_V2.md` com o status final 100% concluído.
+- [x] **Fase 7 (Missão V3): Polimento de UX, Estado da Sessão e Proteção contra Duplicidade**
+  - [x] **Épico 1 (Autenticação e Perfis):** Logins nominais no SQLite (`renata.alves`, `carlos.eduardo`, `fernanda.lima`, `roberto.almeida`) e tela inicial limpa sinalizando as duas abas laterais (`🧭 Guia de Perfis e Alçadas` e `🛠️ Área do Avaliador`).
+  - [x] **Épico 2 (Refinamento Visual):** Formatação amigável sem *underlines* na interface (`formatar_termo_humano`), diagnóstico sem truncamento de texto e *checkmarks* de validação com alto contraste (`st.success`).
+  - [x] **Épico 3 (Fila Visível e Prevenção de Duplicidade):** Visibilidade da Fila de Aprovação para todos os perfis (modo leitura para Analista e botões de decisão restritos à alçada para Gestores) e bloqueio contra reprocessamento consultando tanto `extrato_erp.csv` quanto o banco `SQLite`.
+  - [x] **Épico 4 (Gestão de Estado — `clear_form_state()`):** Limpeza automática do formulário de ingestão imediatamente após envio à fila e ao realizar logoff/troca de perfil, sem afetar o banco SQLite.

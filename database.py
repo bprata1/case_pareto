@@ -14,11 +14,18 @@ HIERARQUIA_CARGOS = {
 }
 
 USUARIOS_PADRAO = [
-    ("analista", "123", "analista", "Renata Alves", "001120", "Analista Comercial"),
-    ("coordenador", "123", "coordenador", "Carlos Eduardo", "002310", "Coordenação Comercial"),
-    ("gerente", "123", "gerente", "Fernanda Lima", "003450", "Gerência Comercial"),
-    ("diretor", "123", "diretor", "Roberto Almeida", "004512", "Diretoria Comercial"),
+    ("renata.alves", "123", "analista", "Renata Alves", "001120", "Analista Comercial"),
+    ("carlos.eduardo", "123", "coordenador", "Carlos Eduardo", "002310", "Coordenação Comercial"),
+    ("fernanda.lima", "123", "gerente", "Fernanda Lima", "003450", "Gerência Comercial"),
+    ("roberto.almeida", "123", "diretor", "Roberto Almeida", "004512", "Diretoria Comercial"),
 ]
+
+MAPA_ALIASES_LOGIN = {
+    "analista": "renata.alves",
+    "coordenador": "carlos.eduardo",
+    "gerente": "fernanda.lima",
+    "diretor": "roberto.almeida",
+}
 
 
 def get_connection():
@@ -31,7 +38,7 @@ def get_connection():
 def init_db():
     """
     Inicializa o banco SQLite local criando as tabelas `usuarios` e `fila_aprovacao`
-    e populando os usuários de teste ('analista', 'coordenador', 'gerente', 'diretor').
+    e populando os usuários nominais ('renata.alves', 'carlos.eduardo', 'fernanda.lima', 'roberto.almeida').
     """
     try:
         conn = get_connection()
@@ -80,9 +87,12 @@ def init_db():
             )
         """)
 
+        # Remover logins genéricos legados da V2 caso existam, mantendo apenas os logins nominais da V3
+        cursor.execute("DELETE FROM usuarios WHERE username IN ('analista', 'coordenador', 'gerente', 'diretor')")
+
         for u in USUARIOS_PADRAO:
             cursor.execute("""
-                INSERT OR IGNORE INTO usuarios (username, password, role, nome, matricula, cargo_exibicao)
+                INSERT OR REPLACE INTO usuarios (username, password, role, nome, matricula, cargo_exibicao)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, u)
 
@@ -111,17 +121,25 @@ def reset_db():
         return False
 
 
+def _normalizar_username(username: str) -> str:
+    if not username:
+        return ""
+    u = username.strip().lower()
+    return MAPA_ALIASES_LOGIN.get(u, u)
+
+
 def autenticar_usuario(username: str, password: str) -> dict:
     """Valida credenciais na tabela `usuarios` e retorna dicionário do usuário ou None."""
     if not username or not password:
         return None
     try:
         init_db()
+        u_norm = _normalizar_username(username)
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute(
             "SELECT * FROM usuarios WHERE LOWER(username) = LOWER(?) AND password = ?",
-            (username.strip(), password.strip()),
+            (u_norm, password.strip()),
         )
         row = cursor.fetchone()
         conn.close()
@@ -134,14 +152,32 @@ def autenticar_usuario(username: str, password: str) -> dict:
 def obter_usuario_por_username(username: str) -> dict:
     try:
         init_db()
+        u_norm = _normalizar_username(username)
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM usuarios WHERE LOWER(username) = LOWER(?)", (username.strip(),))
+        cursor.execute("SELECT * FROM usuarios WHERE LOWER(username) = LOWER(?)", (u_norm,))
         row = cursor.fetchone()
         conn.close()
         return dict(row) if row else None
     except Exception:
         return None
+
+
+def usuario_pode_aprovar(role: str, nivel_hierarquia_item: int) -> bool:
+    """
+    Verifica se o perfil logado possui alçada para aprovar/rejeitar o item:
+    - analista (nível 1): nunca aprova (apenas visualiza a fila)
+    - coordenador (nível 2): aprova itens de nível <= 2
+    - gerente (nível 3): aprova itens de nível <= 3
+    - diretor (nível 4): aprova itens de nível <= 4 (todos)
+    """
+    if not role:
+        return False
+    r = role.strip().lower()
+    if r == "analista":
+        return False
+    nivel_user = HIERARQUIA_CARGOS.get(r, 1)
+    return nivel_user >= int(nivel_hierarquia_item)
 
 
 def inserir_condicao_fila(dados: dict) -> int:
@@ -184,7 +220,7 @@ def inserir_condicao_fila(dados: dict) -> int:
         json.dumps(dados.get("alertas", []), ensure_ascii=False),
         json.dumps(dados.get("payload", {}), ensure_ascii=False),
         dados.get("origem_referencia", "EMAIL"),
-        dados.get("criado_por", "analista"),
+        dados.get("criado_por", "Renata Alves"),
         agora,
     ))
     novo_id = cursor.lastrowid
@@ -193,40 +229,79 @@ def inserir_condicao_fila(dados: dict) -> int:
     return novo_id
 
 
-def listar_fila_por_perfil(role: str, status_filtro: str = None) -> list:
+def listar_todas_condicoes_fila(status_filtro: str = None) -> list:
     """
-    Retorna os itens da fila visíveis para o perfil informado respeitando a hierarquia:
-    - coordenador (nível 2): vê itens com nivel_hierarquia <= 2
-    - gerente (nível 3): vê itens com nivel_hierarquia <= 3 (coordenação + gerência)
-    - diretor (nível 4): vê todos os itens (nivel_hierarquia <= 4)
-    - analista (nível 1): pode consultar itens que ele próprio enviou para acompanhamento
+    Retorna todos os itens da fila de aprovação (para acompanhamento geral).
     """
-    init_db()
-    nivel_usuario = HIERARQUIA_CARGOS.get(role.lower(), 1)
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    if role.lower() == "analista":
-        if status_filtro:
+    try:
+        init_db()
+        conn = get_connection()
+        cursor = conn.cursor()
+        if status_filtro and status_filtro != "TODOS":
             cursor.execute(
                 "SELECT * FROM fila_aprovacao WHERE status_fila = ? ORDER BY id DESC",
                 (status_filtro,),
             )
         else:
             cursor.execute("SELECT * FROM fila_aprovacao ORDER BY id DESC")
-    else:
-        if status_filtro:
-            cursor.execute(
-                "SELECT * FROM fila_aprovacao WHERE nivel_hierarquia <= ? AND status_fila = ? ORDER BY id DESC",
-                (nivel_usuario, status_filtro),
-            )
-        else:
-            cursor.execute(
-                "SELECT * FROM fila_aprovacao WHERE nivel_hierarquia <= ? ORDER BY id DESC",
-                (nivel_usuario,),
-            )
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"Erro ao listar fila completa: {e}")
+        return []
 
-    rows = [dict(r) for r in cursor.fetchall()]
+
+def listar_condicoes_ativas_sqlite() -> list:
+    """
+    Retorna todas as condições no SQLite com status 'PENDENTE' ou 'APROVADO'
+    para verificação contra duplicidade e sobreposição no momento da ingestão.
+    """
+    try:
+        init_db()
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM fila_aprovacao WHERE status_fila IN ('PENDENTE', 'APROVADO') ORDER BY id DESC"
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"Erro ao consultar condições ativas no SQLite: {e}")
+        return []
+
+
+def listar_fila_por_perfil(role: str, status_filtro: str = None, incluir_todas_alcadas: bool = False) -> list:
+    """
+    Retorna os itens da fila para o perfil informado:
+    - Se `role == 'analista'` ou `incluir_todas_alcadas == True`: retorna todas as demandas da fila para visualização.
+    - Caso contrário (visão estrita de alçada do gestor):
+      * coordenador (nível 2): vê itens com nivel_hierarquia <= 2
+      * gerente (nível 3): vê itens com nivel_hierarquia <= 3
+      * diretor (nível 4): vê todos os itens (nivel_hierarquia <= 4)
+    """
+    init_db()
+    r = role.strip().lower() if role else "analista"
+    if r == "analista" or incluir_todas_alcadas:
+        return listar_todas_condicoes_fila(status_filtro)
+
+    nivel_usuario = HIERARQUIA_CARGOS.get(r, 1)
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if status_filtro and status_filtro != "TODOS":
+        cursor.execute(
+            "SELECT * FROM fila_aprovacao WHERE nivel_hierarquia <= ? AND status_fila = ? ORDER BY id DESC",
+            (nivel_usuario, status_filtro),
+        )
+    else:
+        cursor.execute(
+            "SELECT * FROM fila_aprovacao WHERE nivel_hierarquia <= ? ORDER BY id DESC",
+            (nivel_usuario,),
+        )
+
+    rows = [dict(r_row) for r_row in cursor.fetchall()]
     conn.close()
     return rows
 
@@ -256,9 +331,14 @@ def decidir_condicao_fila(item_id: int, novo_status: str, usuario: dict, observa
         conn = get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("SELECT payload_json FROM fila_aprovacao WHERE id = ?", (item_id,))
+        cursor.execute("SELECT payload_json, nivel_hierarquia FROM fila_aprovacao WHERE id = ?", (item_id,))
         row = cursor.fetchone()
         if not row:
+            conn.close()
+            return False
+
+        # Garantir trava de segurança de alçada no backend
+        if not usuario_pode_aprovar(usuario.get("role", ""), row["nivel_hierarquia"]):
             conn.close()
             return False
 
@@ -295,4 +375,3 @@ def decidir_condicao_fila(item_id: int, novo_status: str, usuario: dict, observa
     except Exception as e:
         print(f"Erro ao atualizar decisão na fila: {e}")
         return False
-

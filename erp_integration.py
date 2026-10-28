@@ -538,31 +538,36 @@ def verificar_sobreposicao_extrato(
     lojas: list,
     data_inicio_str: str,
     data_fim_str: str,
-    cod_condicao_substituida: str = None
+    cod_condicao_substituida: str = None,
+    tipo_condicao: str = None
 ) -> dict:
     """
-    Edge Case 6 — Regra 9 (Sobreposição Contratual):
-    Cruza os parâmetros com `dataset/extrato_erp.csv` (onde STATUS == 'VIGENTE').
-    Se o mesmo fornecedor, categoria e loja tiverem datas conflitantes/sobrepostas,
+    Edge Case 6 (Regra 9 - Sobreposição Contratual) + Épico 3 V3 (Prevenção de Duplicidade no SQLite):
+    1. Cruza os parâmetros com `dataset/extrato_erp.csv` (onde STATUS == 'VIGENTE').
+    2. Consulta também o banco SQLite local (`fila_aprovacao` onde status_fila IN ('PENDENTE', 'APROVADO')).
+    Se o mesmo fornecedor, categoria e loja tiverem datas conflitantes/sobrepostas ou condição já cadastrada,
     retorna os detalhes do conflito para barrar o cadastro.
     """
     conflitos = []
     if not cod_fornecedor or not cod_categoria or not lojas or not data_inicio_str or not data_fim_str:
-        return {"tem_conflito": False, "conflitos": [], "mensagem": ""}
+        return {"tem_conflito": False, "duplicidade_sqlite": False, "conflitos": [], "mensagem": ""}
 
     try:
         dt_ini_nova = datetime.strptime(str(data_inicio_str).strip()[:10], "%Y-%m-%d").date()
         dt_fim_nova = datetime.strptime(str(data_fim_str).strip()[:10], "%Y-%m-%d").date()
     except Exception:
-        return {"tem_conflito": False, "conflitos": [], "mensagem": ""}
+        return {"tem_conflito": False, "duplicidade_sqlite": False, "conflitos": [], "mensagem": ""}
 
     cod_forn_upper = str(cod_fornecedor).strip().upper()
     cod_cat_upper = normalizar_categoria(cod_categoria)
     lojas_upper = [str(l).strip().upper() for l in lojas if str(l).strip()]
     cond_subst_upper = str(cod_condicao_substituida).strip().upper() if cod_condicao_substituida else ""
+    tipo_upper = str(tipo_condicao).strip().upper() if tipo_condicao else ""
 
     conflitos_por_cond = {}
+    duplicidade_sqlite = False
 
+    # 1. Verificar no extrato estático do ERP (dataset/extrato_erp.csv)
     for row in EXTRATO_ERP:
         status_row = str(row.get("STATUS", "")).strip().upper()
         if status_row != "VIGENTE":
@@ -573,14 +578,12 @@ def verificar_sobreposicao_extrato(
         loja_row = str(row.get("COD_LOJA", "")).strip().upper()
         cond_id = str(row.get("COND_ID", "")).strip().upper()
 
-        # Se o usuário explicitamente informou que esta condição substitui a COND-### vigente, não há conflito com ela
         if cond_subst_upper and cond_id == cond_subst_upper:
             continue
 
         if forn_row != cod_forn_upper or cat_row != cod_cat_upper:
             continue
 
-        # Verificar sobreposição de loja
         loja_sobrepoe = (
             loja_row == "REDE"
             or "REDE" in lojas_upper
@@ -589,7 +592,6 @@ def verificar_sobreposicao_extrato(
         if not loja_sobrepoe:
             continue
 
-        # Converter datas do CSV (YYYYMMDD)
         dt_ini_csv_str = str(row.get("DT_INI", "")).strip()
         dt_fim_csv_str = str(row.get("DT_FIM", "")).strip()
         try:
@@ -598,11 +600,12 @@ def verificar_sobreposicao_extrato(
         except Exception:
             continue
 
-        # Verificar sobreposição de intervalo de datas: [A, B] e [C, D] se sobrepõem sse A <= D e B >= C
         if dt_ini_nova <= dt_fim_csv and dt_fim_nova >= dt_ini_csv:
             if cond_id not in conflitos_por_cond:
                 conflitos_por_cond[cond_id] = {
                     "cod_condicao": cond_id,
+                    "origem_conflito": "EXTRATO_ERP",
+                    "status_registro": "VIGENTE",
                     "cod_fornecedor": forn_row,
                     "cod_categoria": cat_row,
                     "lojas_conflitantes": [],
@@ -614,21 +617,90 @@ def verificar_sobreposicao_extrato(
             if loja_row not in conflitos_por_cond[cond_id]["lojas_conflitantes"]:
                 conflitos_por_cond[cond_id]["lojas_conflitantes"].append(loja_row)
 
+    # 2. Verificar também no banco de dados SQLite (itens APROVADOS ou PENDENTES na fila)
+    try:
+        import database
+        itens_sqlite = database.listar_condicoes_ativas_sqlite()
+        for item in itens_sqlite:
+            forn_db = str(item.get("cod_fornecedor", "")).strip().upper()
+            cat_db = normalizar_categoria(item.get("cod_categoria", ""))
+            tipo_db = str(item.get("tipo", "")).strip().upper()
+
+            if forn_db != cod_forn_upper or cat_db != cod_cat_upper:
+                continue
+
+            # Permitir coexistência apenas quando for componente distinto de condição mista (Regra 5: Desconto vs Verba)
+            if tipo_upper and tipo_db and tipo_upper != tipo_db:
+                continue
+
+            try:
+                lojas_db = [str(x).strip().upper() for x in json.loads(item.get("lojas_json", "[]"))]
+            except Exception:
+                lojas_db = []
+
+            lojas_intersec = []
+            if "REDE" in lojas_db or "REDE" in lojas_upper:
+                lojas_intersec = ["REDE"]
+            else:
+                lojas_intersec = [l for l in lojas_upper if l in lojas_db]
+
+            if not lojas_intersec:
+                continue
+
+            try:
+                dt_ini_db = datetime.strptime(str(item.get("data_inicio", "")).strip()[:10], "%Y-%m-%d").date()
+                dt_fim_db = datetime.strptime(str(item.get("data_fim", "")).strip()[:10], "%Y-%m-%d").date()
+            except Exception:
+                continue
+
+            if dt_ini_nova <= dt_fim_db and dt_fim_nova >= dt_ini_db:
+                duplicidade_sqlite = True
+                chave_db = f"PROTOCOLO-#{item['id']}"
+                conflitos_por_cond[chave_db] = {
+                    "cod_condicao": chave_db,
+                    "origem_conflito": "SQLITE_ERP",
+                    "status_registro": item.get("status_fila", "PENDENTE"),
+                    "cod_fornecedor": forn_db,
+                    "cod_categoria": cat_db,
+                    "lojas_conflitantes": lojas_intersec,
+                    "data_inicio": dt_ini_db.strftime("%Y-%m-%d"),
+                    "data_fim": dt_fim_db.strftime("%Y-%m-%d"),
+                    "tipo": tipo_db,
+                    "valor_atual": str(item.get("valor", "")),
+                }
+    except Exception as e:
+        print(f"Aviso ao verificar duplicidade no SQLite: {e}")
+
     conflitos = list(conflitos_por_cond.values())
     if conflitos:
         resumo = "; ".join([
-            f"{c['cod_condicao']} (Lojas: {', '.join(c['lojas_conflitantes'])}, "
-            f"Vigência: {c['data_inicio']} a {c['data_fim']})"
+            f"{c['cod_condicao']} [Status: {c['status_registro']}] "
+            f"(Lojas: {', '.join(c['lojas_conflitantes'])}, Vigência: {c['data_inicio']} a {c['data_fim']})"
             for c in conflitos
         ])
-        msg = (
-            f"Sobreposição contratual detectada no `extrato_erp.csv` (Regra 9): "
-            f"Já existe(m) condição(ões) VIGENTE(S) para {cod_forn_upper} na categoria {cod_cat_upper} "
-            f"no mesmo período e loja(s): {resumo}."
-        )
-        return {"tem_conflito": True, "conflitos": conflitos, "mensagem": msg}
+        if duplicidade_sqlite:
+            msg = (
+                f"Atenção: Esta condição já existe no ERP / Fila de Aprovação! "
+                f"Fornecedor {cod_forn_upper}, categoria {cod_cat_upper}, com período e loja(s) já registrados em: {resumo}. "
+                f"O envio em duplicidade foi bloqueado para evitar retrabalho operacional."
+            )
+        else:
+            msg = (
+                f"Atenção: Esta condição já existe no ERP (`extrato_erp.csv` — Regra 9)! "
+                f"Já existe(m) condição(ões) VIGENTE(S) para {cod_forn_upper} na categoria {cod_cat_upper} "
+                f"no mesmo período e loja(s): {resumo}."
+            )
+        return {
+            "tem_conflito": True,
+            "duplicidade_sqlite": duplicidade_sqlite,
+            "conflitos": conflitos,
+            "mensagem": msg
+        }
 
-    return {"tem_conflito": False, "conflitos": [], "mensagem": ""}
+    return {"tem_conflito": False, "duplicidade_sqlite": False, "conflitos": [], "mensagem": ""}
+
+
+validar_sobreposicao = verificar_sobreposicao_extrato
 
 
 def detectar_prompt_injection(texto: str) -> dict:
